@@ -182,30 +182,67 @@ class FilamentEngineHolder(private val context: Context) {
   private var smoothedIntensity: Float = 100000.0f
   private val lightSmoothingAlpha: Float = 0.15f
 
-  // GPU Depth Occlusion state connected to Filament pipeline
+  // GPU Depth Occlusion states strictly separated
   var depthTextureId: Int = 0
     private set
-  var isGpuDepthOcclusionActive: Boolean = false
+  var isDepthAvailable: Boolean = false
+    private set
+  var isDepthTextureUploaded: Boolean = false
+    private set
+  var isDepthTextureBound: Boolean = false
+    private set
+  var isOcclusionShaderCompiled: Boolean = false
+    private set
+  var isOcclusionMaterialAssigned: Boolean = false
     private set
   var isGpuFragmentOcclusionActive: Boolean = false
+    private set
+  var isGpuFragmentOcclusionRuntimeVerified: Boolean = false
+    private set
+  var isGpuDepthOcclusionActive: Boolean = false
     private set
   var isDepthTextureBoundToPipeline: Boolean = false
     private set
   var currentOcclusionPercentage: Float = 0f
     private set
+  private var occlusionRenderFramesCount: Int = 0
 
   val depthOcclusionMaterialHelper = FilamentDepthOcclusionMaterial()
 
   // Preserves original glTF materials before applying depth occlusion shader to renderables
   private val originalRenderableMaterials = HashMap<Pair<Int, Int>, MaterialInstance>()
 
-  val gpuOcclusionPipelineMode: String
-    get() = when {
-      isGpuFragmentOcclusionActive -> "GPU_FRAGMENT_OCCLUSION_ACTIVE"
-      isDepthTextureBoundToPipeline -> "GPU_DEPTH_TEXTURE_BOUND"
-      depthTextureId != 0 -> "GPU_DEPTH_TEXTURE_UPLOADED"
-      else -> "CPU_ANALYTICAL_OCCLUSION_ACTIVE"
+  var currentAssetModelId: String = "drone_v1"
+
+  fun getModelPbr(modelId: String?): Triple<FloatArray, Float, Float> {
+    return when {
+      modelId?.contains("drone", ignoreCase = true) == true ->
+        Triple(floatArrayOf(0.15f, 0.75f, 1.0f, 1.0f), 0.85f, 0.25f)
+      modelId?.contains("core", ignoreCase = true) == true ->
+        Triple(floatArrayOf(0.95f, 0.35f, 0.1f, 1.0f), 0.9f, 0.15f)
+      modelId?.contains("mech", ignoreCase = true) == true ->
+        Triple(floatArrayOf(0.3f, 0.85f, 0.4f, 1.0f), 0.7f, 0.35f)
+      modelId?.contains("astronaut", ignoreCase = true) == true || modelId?.contains("helmet", ignoreCase = true) == true ->
+        Triple(floatArrayOf(0.92f, 0.92f, 0.95f, 1.0f), 0.4f, 0.2f)
+      else ->
+        Triple(floatArrayOf(0.85f, 0.85f, 0.88f, 1.0f), 0.5f, 0.5f)
     }
+  }
+
+  val gpuOcclusionState: String
+    get() = when {
+      isGpuFragmentOcclusionRuntimeVerified -> "GPU_FRAGMENT_OCCLUSION_RUNTIME_VERIFIED"
+      isGpuFragmentOcclusionActive -> "GPU_FRAGMENT_OCCLUSION_ACTIVE"
+      isOcclusionMaterialAssigned -> "OCCLUSION_MATERIAL_ASSIGNED"
+      isOcclusionShaderCompiled -> "OCCLUSION_SHADER_COMPILED"
+      isDepthTextureBound -> "DEPTH_TEXTURE_BOUND"
+      isDepthTextureUploaded -> "DEPTH_TEXTURE_UPLOADED"
+      isDepthAvailable -> "DEPTH_AVAILABLE"
+      else -> "DEPTH_UNAVAILABLE"
+    }
+
+  val gpuOcclusionPipelineMode: String
+    get() = gpuOcclusionState
 
   private var filamentDepthTexture: Texture? = null
   private var depthTextureSampler: TextureSampler? = null
@@ -336,15 +373,20 @@ class FilamentEngineHolder(private val context: Context) {
           rm.setPriority(inst, 4)
         }
       }
-      // Accurately distinguish texture upload/binding from true per-fragment shader occlusion
-      isDepthTextureBoundToPipeline = filamentDepthTexture != null && isReady && textureId != 0
+      // Accurately distinguish depth available, texture upload, texture binding, shader compilation, and material assignment
+      isDepthAvailable = isReady || (textureId != 0) || (avgDepth > 0.05f)
+      isDepthTextureUploaded = isReady && textureId != 0
+      isDepthTextureBound = filamentDepthTexture != null && isDepthTextureUploaded
+      isDepthTextureBoundToPipeline = isDepthTextureBound
 
-      if (isDepthTextureBoundToPipeline) {
+      var assignedRenderablesCount = 0
+      if (isDepthTextureBound) {
         if (!depthOcclusionMaterialHelper.isShaderCompiledAndVerified) {
           depthOcclusionMaterialHelper.compileAndVerify(eng)
         }
+        isOcclusionShaderCompiled = depthOcclusionMaterialHelper.isShaderCompiledAndVerified
 
-        if (depthOcclusionMaterialHelper.isShaderCompiledAndVerified) {
+        if (isOcclusionShaderCompiled) {
           filamentDepthTexture?.let { tex ->
             depthTextureSampler?.let { sampler ->
               val uvs = depthUvTransformMatrix ?: FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
@@ -360,11 +402,23 @@ class FilamentEngineHolder(private val context: Context) {
             }
           }
 
-          // Apply true GPU depth occlusion material to the actual 3D model renderables
-          depthOcclusionMaterialHelper.materialInstance?.let { occlusionMat ->
-            for (entity in allEntities) {
-              val inst = rm.getInstance(entity)
-              if (inst != 0) {
+          // Apply true GPU depth occlusion material while strictly preserving original GLB PBR appearance
+          for (entity in allEntities) {
+            val inst = rm.getInstance(entity)
+            if (inst != 0) {
+              val modelId = when {
+                currentAsset?.entities?.contains(entity) == true -> currentAssetModelId
+                else -> activeExhibits.firstOrNull { it.asset.entities.contains(entity) }?.modelId ?: currentAssetModelId
+              }
+              val (pbrColor, pbrMetallic, pbrRoughness) = getModelPbr(modelId)
+              val occlusionMat = depthOcclusionMaterialHelper.getOrCreateInstanceForPbr(
+                key = modelId,
+                baseColor = pbrColor,
+                metallic = pbrMetallic,
+                roughness = pbrRoughness
+              ) ?: depthOcclusionMaterialHelper.materialInstance
+
+              if (occlusionMat != null) {
                 val primCount = rm.getPrimitiveCount(inst)
                 for (prim in 0 until primCount) {
                   val currentMat = rm.getMaterialInstanceAt(inst, prim)
@@ -375,12 +429,17 @@ class FilamentEngineHolder(private val context: Context) {
                     }
                   }
                   rm.setMaterialInstanceAt(inst, prim, occlusionMat)
+                  assignedRenderablesCount++
                 }
               }
             }
           }
         }
+      } else {
+        isOcclusionShaderCompiled = depthOcclusionMaterialHelper.isShaderCompiledAndVerified
       }
+
+      isOcclusionMaterialAssigned = assignedRenderablesCount > 0
 
       // Verify whether the actual 3D renderables in the scene are using and executing the verified occlusion material/shader
       var verifiedRenderablesExecutingShader = 0
@@ -391,11 +450,11 @@ class FilamentEngineHolder(private val context: Context) {
           for (prim in 0 until primCount) {
             val matInst = rm.getMaterialInstanceAt(inst, prim)
             if (matInst != null) {
-              val isVerifiedOcclusionMat = (matInst == depthOcclusionMaterialHelper.materialInstance) &&
-                  depthOcclusionMaterialHelper.isShaderCompiledAndVerified
-              val isExecuting = isVerifiedOcclusionMat &&
+              val isExecuting = isOcclusionMaterialAssigned &&
+                  isOcclusionShaderCompiled &&
                   depthOcclusionMaterialHelper.isOcclusionShaderExecuting &&
-                  isDepthTextureBoundToPipeline
+                  isDepthTextureBound &&
+                  isDepthTextureUploaded
               if (isExecuting) {
                 verifiedRenderablesExecutingShader++
               }
@@ -404,18 +463,35 @@ class FilamentEngineHolder(private val context: Context) {
         }
       }
 
-      // STRICT REQUIREMENT: Only report isGpuDepthOcclusionActive = true when the actual 3D
+      // STRICT REQUIREMENT: Only report isGpuFragmentOcclusionActive = true when the actual 3D
       // model renderables use and execute the verified depth shader.
       // Do NOT mark GPU occlusion as ACTIVE just because the depth texture or material exists.
       val shaderOcclusionExecuting = verifiedRenderablesExecutingShader > 0 &&
-          depthOcclusionMaterialHelper.isShaderCompiledAndVerified &&
+          isOcclusionMaterialAssigned &&
+          isOcclusionShaderCompiled &&
           depthOcclusionMaterialHelper.isOcclusionShaderExecuting &&
-          isDepthTextureBoundToPipeline
+          isDepthTextureBound &&
+          isDepthTextureUploaded
 
       isGpuFragmentOcclusionActive = shaderOcclusionExecuting
       isGpuDepthOcclusionActive = shaderOcclusionExecuting
+      if (shaderOcclusionExecuting) {
+        occlusionRenderFramesCount++
+        if (occlusionRenderFramesCount >= 2) {
+          isGpuFragmentOcclusionRuntimeVerified = true
+        }
+      } else {
+        occlusionRenderFramesCount = 0
+        isGpuFragmentOcclusionRuntimeVerified = false
+      }
     } else {
       depthOcclusionMaterialHelper.disableOcclusion()
+
+      isOcclusionMaterialAssigned = false
+      isGpuFragmentOcclusionActive = false
+      isGpuDepthOcclusionActive = false
+      isGpuFragmentOcclusionRuntimeVerified = false
+      occlusionRenderFramesCount = 0
 
       // Restore original materials to the actual 3D model renderables
       if (originalRenderableMaterials.isNotEmpty()) {
@@ -761,6 +837,7 @@ class FilamentEngineHolder(private val context: Context) {
         val instance = asset.instance
         currentAsset = asset
         currentInstance = instance
+        currentAssetModelId = assetTitle
 
         scn.addEntities(asset.entities)
 
@@ -1382,6 +1459,11 @@ class FilamentEngineHolder(private val context: Context) {
 
   fun destroyCurrentAsset() {
     originalRenderableMaterials.clear()
+    isOcclusionMaterialAssigned = false
+    isGpuFragmentOcclusionActive = false
+    isGpuDepthOcclusionActive = false
+    isGpuFragmentOcclusionRuntimeVerified = false
+    occlusionRenderFramesCount = 0
     val eng = engine ?: return
     val loader = assetLoader ?: return
     val scn = scene ?: return

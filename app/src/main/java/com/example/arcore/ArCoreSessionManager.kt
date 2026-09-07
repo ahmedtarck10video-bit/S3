@@ -676,7 +676,7 @@ class ArCoreSessionManager(private val context: Context) {
         isMultiplayerActive = multiplayerBackend.isMultiplayerActive,
         isOnlineMultiplayerActive = multiplayerBackend.isOnlineMultiplayerActive,
         isLoopbackTestActive = multiplayerBackend.isLoopbackTestActive,
-        multiplayerMode = multiplayerBackend.multiplayerMode.name,
+        multiplayerMode = multiplayerBackend.multiplayerStatus,
         certification = deviceCertification,
         detectedPlanes = scratchPlaneList,
         detectedImages = scratchImageList

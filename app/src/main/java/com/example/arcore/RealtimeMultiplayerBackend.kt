@@ -93,9 +93,10 @@ enum class BackendConnectionState {
  */
 enum class MultiplayerMode {
   OFFLINE,
+  LOOPBACK,
+  ONLINE_MULTIPLAYER,
   LOCAL_LOOPBACK_TEST,
-  FALLBACK_LOOPBACK,
-  ONLINE_MULTIPLAYER
+  FALLBACK_LOOPBACK
 }
 
 /**
@@ -172,8 +173,19 @@ class RealtimeMultiplayerBackend {
 
   val isLoopbackTestActive: Boolean
     get() = isLoopbackMode &&
-        (multiplayerMode == MultiplayerMode.LOCAL_LOOPBACK_TEST || multiplayerMode == MultiplayerMode.FALLBACK_LOOPBACK) &&
+        (multiplayerMode == MultiplayerMode.LOOPBACK || multiplayerMode == MultiplayerMode.LOCAL_LOOPBACK_TEST || multiplayerMode == MultiplayerMode.FALLBACK_LOOPBACK) &&
         _currentRoom.value != null
+
+  /**
+   * Explicitly separated multiplayer states:
+   * ONLINE_MULTIPLAYER, LOOPBACK, OFFLINE.
+   */
+  val multiplayerStatus: String
+    get() = when {
+      isOnlineMultiplayerActive -> "ONLINE_MULTIPLAYER"
+      isLoopbackTestActive || isLoopbackMode -> "LOOPBACK"
+      else -> "OFFLINE"
+    }
 
   /**
    * NEVER report multiplayer as active when the backend is disconnected!

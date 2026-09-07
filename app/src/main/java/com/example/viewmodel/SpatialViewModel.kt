@@ -333,7 +333,15 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     depthManager: DepthOcclusionManager? = null,
     modelDimensions: String = "1.00m x 0.85m x 1.10m (1:1 Scale)",
     isGpuDepthOcclusionActive: Boolean = false,
-    isDepthTextureBoundToPipeline: Boolean = false
+    isDepthTextureBoundToPipeline: Boolean = false,
+    isDepthAvailable: Boolean = false,
+    isDepthTextureUploaded: Boolean = false,
+    isDepthTextureBound: Boolean = false,
+    isOcclusionShaderCompiled: Boolean = false,
+    isOcclusionMaterialAssigned: Boolean = false,
+    isGpuFragmentOcclusionActive: Boolean = false,
+    isGpuFragmentOcclusionRuntimeVerified: Boolean = false,
+    gpuOcclusionState: String = "DEPTH_UNAVAILABLE"
   ) {
     // Update distances from camera to anchors
     val camPos = trackingData.cameraPosition
@@ -387,22 +395,25 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         occlusionPercentage = depthManager?.occlusionPercentage ?: 0f,
         isGpuDepthOcclusionActive = isGpuDepthOcclusionActive,
         isDepthTextureBoundToPipeline = isDepthTextureBoundToPipeline,
-        isGpuDepthTextureUploaded = depthManager?.isDepthTextureReady == true && ((depthManager?.depthTextureId ?: 0) != 0),
+        isGpuDepthTextureUploaded = isDepthTextureUploaded || (depthManager?.isDepthTextureReady == true && ((depthManager?.depthTextureId ?: 0) != 0)),
         isShaderFragmentDiscardActive = isGpuDepthOcclusionActive,
         isCpuAnalyticalOcclusionActive = true,
-        gpuOcclusionPipelineMode = when {
-          isGpuDepthOcclusionActive -> "GPU_FRAGMENT_OCCLUSION_ACTIVE"
-          isDepthTextureBoundToPipeline -> "GPU_DEPTH_TEXTURE_BOUND"
-          depthManager?.isDepthTextureReady == true && ((depthManager?.depthTextureId ?: 0) != 0) -> "GPU_DEPTH_TEXTURE_UPLOADED"
-          else -> "CPU_ANALYTICAL_OCCLUSION_ACTIVE"
-        },
+        isDepthAvailable = isDepthAvailable || trackingData.isDepthEnabled || (depthManager?.isDepthAvailable == true),
+        isDepthTextureUploaded = isDepthTextureUploaded || (depthManager?.isDepthTextureReady == true),
+        isDepthTextureBound = isDepthTextureBound || isDepthTextureBoundToPipeline,
+        isOcclusionShaderCompiled = isOcclusionShaderCompiled,
+        isOcclusionMaterialAssigned = isOcclusionMaterialAssigned,
+        isGpuFragmentOcclusionActive = isGpuFragmentOcclusionActive,
+        isGpuFragmentOcclusionRuntimeVerified = isGpuFragmentOcclusionRuntimeVerified,
+        gpuOcclusionState = gpuOcclusionState,
+        gpuOcclusionPipelineMode = gpuOcclusionState,
         cameraStreamStatus = if (trackingData.trackingState == TrackingState.TRACKING) "ARCORE_CAMERA_ACTIVE" else "CAMERA_STREAM_ACTIVE",
         isInstantPlacementActive = trackingData.isInstantPlacementEnabled,
         isGeospatialSupported = trackingData.geospatialStatus.isSupported,
         isGeospatialEnabled = trackingData.geospatialStatus.isEnabled,
         hasLocationPermission = trackingData.geospatialStatus.locationPermissionGranted,
         isEarthTrackingActive = trackingData.geospatialStatus.trackingState == "TRACKING",
-        isVpsActive = trackingData.geospatialStatus.vpsAvailability == "AVAILABLE",
+        isVpsActive = trackingData.geospatialStatus.isVpsLocalized && trackingData.geospatialStatus.vpsAvailability == "AVAILABLE" && trackingData.geospatialStatus.trackingState == "TRACKING",
         isVpsLocalized = trackingData.geospatialStatus.isVpsLocalized && trackingData.geospatialStatus.vpsAvailability == "AVAILABLE",
         isGeospatialActive = trackingData.geospatialStatus.isSupported && trackingData.geospatialStatus.isEnabled && trackingData.geospatialStatus.trackingState == "TRACKING",
         earthTrackingState = when {
@@ -453,6 +464,7 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         streetscapeGeometriesCount = trackingData.reconstructionTelemetry.streetscapeGeometriesCount,
         denseMeshChunksCount = trackingData.reconstructionTelemetry.denseMeshChunksCount,
         isDenseLocalMeshActive = trackingData.reconstructionTelemetry.isDenseLocalMeshActive,
+        isValidatedLocalSceneMesh = trackingData.reconstructionTelemetry.isValidatedLocalSceneMesh,
         isFull3dSceneReconstruction = trackingData.reconstructionTelemetry.isFull3dSceneReconstruction,
         reconstructionStage = trackingData.reconstructionTelemetry.reconstructionStage,
         metricDimensions = modelDimensions

@@ -132,8 +132,13 @@ fun DiagnosticsHud(
         modifier = Modifier.fillMaxWidth()
       ) {
         val occMode = when {
-          telemetry.isGpuDepthOcclusionActive -> "GPU Shader"
-          telemetry.isDepthTextureBoundToPipeline -> "GPU Tex Bound"
+          telemetry.isGpuFragmentOcclusionRuntimeVerified -> "GPU Verified"
+          telemetry.isGpuFragmentOcclusionActive -> "GPU Active"
+          telemetry.isOcclusionMaterialAssigned -> "Mat Assigned"
+          telemetry.isOcclusionShaderCompiled -> "Shader Compiled"
+          telemetry.isDepthTextureBound -> "Tex Bound"
+          telemetry.isDepthTextureUploaded -> "Tex Uploaded"
+          telemetry.isDepthAvailable -> "Depth Ready"
           else -> "CPU Per-Pixel"
         }
         Text(

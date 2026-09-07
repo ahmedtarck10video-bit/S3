@@ -224,7 +224,15 @@ fun MixedRealityScreen(
           depthManager = depthOcclusionManager,
           modelDimensions = dims,
           isGpuDepthOcclusionActive = filamentEngine.isGpuDepthOcclusionActive,
-          isDepthTextureBoundToPipeline = filamentEngine.isDepthTextureBoundToPipeline
+          isDepthTextureBoundToPipeline = filamentEngine.isDepthTextureBoundToPipeline,
+          isDepthAvailable = filamentEngine.isDepthAvailable,
+          isDepthTextureUploaded = filamentEngine.isDepthTextureUploaded,
+          isDepthTextureBound = filamentEngine.isDepthTextureBound,
+          isOcclusionShaderCompiled = filamentEngine.isOcclusionShaderCompiled,
+          isOcclusionMaterialAssigned = filamentEngine.isOcclusionMaterialAssigned,
+          isGpuFragmentOcclusionActive = filamentEngine.isGpuFragmentOcclusionActive,
+          isGpuFragmentOcclusionRuntimeVerified = filamentEngine.isGpuFragmentOcclusionRuntimeVerified,
+          gpuOcclusionState = filamentEngine.gpuOcclusionState
         )
       }
       onAnchorPlaced = { anchor, hitPos, source, modelId, modelTitle ->

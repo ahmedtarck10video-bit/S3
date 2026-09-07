@@ -64,6 +64,8 @@ class DepthOcclusionManager {
     private set
   var isDepthTextureReady: Boolean = false
     private set
+  val isDepthAvailable: Boolean
+    get() = isDepthTextureReady || depthCoveragePercentage > 0f || (averageDepthMeters > 0.05f)
 
   // Preallocated direct buffer for GPU depth texture upload (zero per-frame allocations)
   private var gpuUploadBuffer: ByteBuffer = ByteBuffer.allocateDirect(MAX_DEPTH_WIDTH * MAX_DEPTH_HEIGHT * 2)
@@ -345,13 +347,17 @@ class DepthOcclusionManager {
         // Transform anchor into camera space to measure real optical depth along camera optical axis (-Z)
         // Camera-relative view-space Z: identical coordinate frame to ARCore depth image
         val poseInCameraSpace = camPose.inverse().compose(anchorPose)
-        val cameraSpaceZ = -poseInCameraSpace.tz() // Optical forward axis is -Z in camera view space
+        val camTx = poseInCameraSpace.tx()
+        val camTy = poseInCameraSpace.ty()
+        val camTz = poseInCameraSpace.tz()
+        val cameraSpaceZ = -camTz // Optical forward axis is -Z in camera view space
 
         // If behind camera near plane or at eye level, skip occlusion check
         if (cameraSpaceZ <= 0.05f) continue
 
-        // Strictly camera-relative view-space optical depth (matches physical depth buffer measurements)
-        val virtualDepthMeters = cameraSpaceZ
+        // Reconstruct Euclidean ray distance in view space
+        val virtualRayDist = kotlin.math.sqrt(camTx * camTx + camTy * camTy + camTz * camTz)
+        val cosTheta = (cameraSpaceZ / virtualRayDist).coerceIn(0.001f, 1.0f)
 
         // Project 3D anchor position into screen-space normalized coordinates [0..1]
         val clip = FloatArray(4)
@@ -383,7 +389,8 @@ class DepthOcclusionManager {
             frame = frame,
             viewX = sx,
             viewY = sy,
-            virtualDepthMeters = virtualDepthMeters
+            virtualRayDistance = virtualRayDist,
+            cosTheta = cosTheta
           )
           if (isOccluded) occludedCount++
         }
@@ -408,13 +415,15 @@ class DepthOcclusionManager {
   /**
    * Evaluates exact true per-pixel depth occlusion at normalized screen coordinates [0..1].
    * Maps Viewport coordinates to Depth coordinates via ARCore's transformCoordinates2d.
+   * Reconstructs physical depth into the exact camera view-space ray metric used by the virtual fragment.
    * Returns true if physical foreground depth is closer than the virtual object depth.
    */
   fun isPixelOccluded(
     frame: Frame,
     viewX: Float,
     viewY: Float,
-    virtualDepthMeters: Float
+    virtualRayDistance: Float,
+    cosTheta: Float = 1.0f
   ): Boolean {
     if (depthWidth <= 0 || depthHeight <= 0) return false
 
@@ -442,10 +451,20 @@ class DepthOcclusionManager {
 
     val realDepthMeters = depthMm / 1000.0f
 
-    // True per-pixel occlusion test:
-    // If real world physical depth is in front of the virtual object (with tolerance), virtual pixel is occluded!
-    return realDepthMeters < (virtualDepthMeters - OCCLUSION_TOLERANCE_METERS)
+    // Reconstruct physical depth into the exact camera/view-space metric used by the virtual fragment
+    val safeCosTheta = cosTheta.coerceIn(0.001f, 1.0f)
+    val physicalRayDistance = realDepthMeters / safeCosTheta
+
+    // Geometric comparison in camera view space across the complete viewport
+    return physicalRayDistance < (virtualRayDistance - OCCLUSION_TOLERANCE_METERS)
   }
+
+  fun isPixelOccluded(
+    frame: Frame,
+    viewX: Float,
+    viewY: Float,
+    virtualDepthMeters: Float
+  ): Boolean = isPixelOccluded(frame, viewX, viewY, virtualDepthMeters, 1.0f)
 
   /**
    * Binds the GPU depth texture to an active OpenGL texture unit.

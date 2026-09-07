@@ -74,6 +74,7 @@ data class ReconstructionTelemetry(
   val isLocalEnvironmentalMeshActive: Boolean = false,
   val isDenseLocalReconstructionActive: Boolean = false,
   val isDenseLocalMeshActive: Boolean = isDenseLocalReconstructionActive,
+  val isValidatedLocalSceneMesh: Boolean = false,
   val isFull3dSceneReconstruction: Boolean = false,
   val hasReal3dMeshGeometry: Boolean = false,
   val detectedPlanesCount: Int = 0,
@@ -586,7 +587,8 @@ class EnvironmentalMeshManager {
         totalChunks == 0 -> "IDLE"
         !isLocalMeshActive && isStreetscapeActive -> "ARCORE_STREETSCAPE_GEOMETRY"
         !isLocalMeshActive -> "PLANE_DETECTION_ONLY"
-        isFull3dScene -> "FULL_3D_SCENE_RECONSTRUCTION"
+        isFull3dScene -> "VALIDATED_LOCAL_SCENE_MESH"
+        isDenseLocalReconstruction -> "DENSE_LOCAL_MESH"
         else -> "LOCAL_SURFACE_MESH"
       }
 
@@ -599,7 +601,8 @@ class EnvironmentalMeshManager {
         isLocalEnvironmentalMeshActive = isLocalMeshActive,
         isDenseLocalReconstructionActive = isDenseLocalReconstruction,
         isDenseLocalMeshActive = isDenseLocalReconstruction,
-        isFull3dSceneReconstruction = isFull3dScene,
+        isValidatedLocalSceneMesh = isFull3dScene,
+        isFull3dSceneReconstruction = false, // Conservative: never claim native FULL_3D_SCENE_RECONSTRUCTION from application thresholds alone
         hasReal3dMeshGeometry = hasReal3dMesh,
         detectedPlanesCount = detectedPlaneChunks.size,
         streetscapeGeometriesCount = streetscapeChunks.size,

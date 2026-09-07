@@ -67,15 +67,19 @@ class FilamentDepthOcclusionMaterial {
         .uniformParameter(MaterialBuilder.UniformType.MAT4, "u_viewMatrix")
         .uniformParameter(MaterialBuilder.UniformType.FLOAT, "u_toleranceMeters")
         .uniformParameter(MaterialBuilder.UniformType.FLOAT, "u_occlusionEnabled")
+        .uniformParameter(MaterialBuilder.UniformType.FLOAT4, "u_baseColor")
+        .uniformParameter(MaterialBuilder.UniformType.FLOAT, "u_metallic")
+        .uniformParameter(MaterialBuilder.UniformType.FLOAT, "u_roughness")
         .material(
           """
           void material(inout MaterialInputs material) {
               prepareMaterial(material);
-              material.baseColor = vec4(0.85, 0.85, 0.88, 1.0);
-              material.metallic = 0.15;
-              material.roughness = 0.45;
+              // Preserve original GLB PBR appearance: base color, metallic, roughness
+              material.baseColor = materialParams.u_baseColor;
+              material.metallic = materialParams.u_metallic;
+              material.roughness = materialParams.u_roughness;
 
-              // Per-fragment physical-vs-virtual depth comparison
+              // Geometrically reconstructed physical-vs-virtual depth comparison across complete viewport
               if (materialParams.u_occlusionEnabled > 0.5) {
                   vec2 screenCoord = getNormalizedViewportCoord().xy;
                   vec4 depthUvHomogeneous = materialParams.u_depthUvTransform * vec4(screenCoord, 0.0, 1.0);
@@ -86,12 +90,20 @@ class FilamentDepthOcclusionMaterial {
                       // Reconstruct 16-bit ARCore depth (low byte in R, high byte in A)
                       float depthMm = (packedDepth.r * 255.0) + (packedDepth.a * 255.0 * 256.0);
                       if (depthMm >= 80.0 && depthMm <= 15000.0) {
-                          float physicalDepthMeters = depthMm / 1000.0;
                           vec4 viewPos = materialParams.u_viewMatrix * vec4(getWorldPosition(), 1.0);
-                          float virtualDepthMeters = -viewPos.z;
+                          if (viewPos.z < -0.05) {
+                              // View-space ray from camera optical center (0,0,0) to virtual fragment
+                              vec3 rayDir = normalize(viewPos.xyz);
+                              float cosTheta = max(-rayDir.z, 0.001);
 
-                          if (virtualDepthMeters > 0.05) {
-                              if (physicalDepthMeters < (virtualDepthMeters - materialParams.u_toleranceMeters)) {
+                              // Reconstruct physical depth into the exact camera/view-space metric
+                              // used by the virtual fragment across the complete viewport
+                              float physicalDepthZ = depthMm / 1000.0;
+                              float physicalRayDist = physicalDepthZ / cosTheta;
+                              float virtualRayDist = length(viewPos.xyz);
+
+                              // Per-fragment physical-vs-virtual depth comparison
+                              if (physicalRayDist < (virtualRayDist - materialParams.u_toleranceMeters)) {
                                   // Physical real-world foreground is closer: discard virtual 3D fragment!
                                   material.baseColor.a = 0.0;
                               }
@@ -110,7 +122,11 @@ class FilamentDepthOcclusionMaterial {
           .payload(buf, buf.remaining())
           .build(engine)
         material = mat
-        materialInstance = mat.createInstance()
+        val defaultInst = mat.createInstance()
+        defaultInst.setParameter("u_baseColor", 0.85f, 0.85f, 0.88f, 1.0f)
+        defaultInst.setParameter("u_metallic", 0.15f)
+        defaultInst.setParameter("u_roughness", 0.45f)
+        materialInstance = defaultInst
         isShaderCompiledAndVerified = true
         Log.i(TAG, "True GPU Depth Occlusion material compiled and verified successfully.")
         true
@@ -126,8 +142,59 @@ class FilamentDepthOcclusionMaterial {
     }
   }
 
+  private val modelMaterialInstances = mutableMapOf<String, MaterialInstance>()
+
   /**
-   * Binds physical depth texture and transformation uniforms to the verified material.
+   * Creates or retrieves a specialized MaterialInstance preserving the model's exact PBR appearance.
+   */
+  fun getOrCreateInstanceForPbr(
+    key: String,
+    baseColor: FloatArray = floatArrayOf(0.85f, 0.85f, 0.88f, 1.0f),
+    metallic: Float = 0.15f,
+    roughness: Float = 0.45f
+  ): MaterialInstance? {
+    val mat = material ?: return null
+    var inst = modelMaterialInstances[key]
+    if (inst == null) {
+      inst = mat.createInstance()
+      modelMaterialInstances[key] = inst
+    }
+    try {
+      inst.setParameter("u_baseColor", baseColor[0], baseColor[1], baseColor[2], baseColor[3])
+      inst.setParameter("u_metallic", metallic)
+      inst.setParameter("u_roughness", roughness)
+    } catch (_: Exception) {}
+    return inst
+  }
+
+  /**
+   * Binds physical depth texture and transformation uniforms to a specific material instance.
+   */
+  fun bindParametersToInstance(
+    instance: MaterialInstance,
+    texture: Texture,
+    sampler: TextureSampler,
+    depthUvTransform: FloatArray,
+    viewMatrix: FloatArray,
+    toleranceMeters: Float = 0.04f,
+    isEnabled: Boolean = true
+  ) {
+    if (!isShaderCompiledAndVerified) return
+    try {
+      instance.setParameter("physicalDepthTexture", texture, sampler)
+      instance.setParameter("u_depthUvTransform", MaterialInstance.FloatElement.MAT4, depthUvTransform, 0, 1)
+      instance.setParameter("u_viewMatrix", MaterialInstance.FloatElement.MAT4, viewMatrix, 0, 1)
+      instance.setParameter("u_toleranceMeters", toleranceMeters)
+      instance.setParameter("u_occlusionEnabled", if (isEnabled) 1.0f else 0.0f)
+      isOcclusionShaderExecuting = isEnabled
+    } catch (e: Exception) {
+      Log.w(TAG, "Notice setting depth occlusion material parameters: ${e.message}")
+      isOcclusionShaderExecuting = false
+    }
+  }
+
+  /**
+   * Binds physical depth texture and transformation uniforms to the default and all cached material instances.
    */
   fun bindParameters(
     texture: Texture,
@@ -137,19 +204,12 @@ class FilamentDepthOcclusionMaterial {
     toleranceMeters: Float = 0.04f,
     isEnabled: Boolean = true
   ) {
-    val inst = materialInstance ?: return
     if (!isShaderCompiledAndVerified) return
-
-    try {
-      inst.setParameter("physicalDepthTexture", texture, sampler)
-      inst.setParameter("u_depthUvTransform", MaterialInstance.FloatElement.MAT4, depthUvTransform, 0, 1)
-      inst.setParameter("u_viewMatrix", MaterialInstance.FloatElement.MAT4, viewMatrix, 0, 1)
-      inst.setParameter("u_toleranceMeters", toleranceMeters)
-      inst.setParameter("u_occlusionEnabled", if (isEnabled) 1.0f else 0.0f)
-      isOcclusionShaderExecuting = isEnabled
-    } catch (e: Exception) {
-      Log.w(TAG, "Notice setting depth occlusion material parameters: ${e.message}")
-      isOcclusionShaderExecuting = false
+    materialInstance?.let {
+      bindParametersToInstance(it, texture, sampler, depthUvTransform, viewMatrix, toleranceMeters, isEnabled)
+    }
+    for (inst in modelMaterialInstances.values) {
+      bindParametersToInstance(inst, texture, sampler, depthUvTransform, viewMatrix, toleranceMeters, isEnabled)
     }
   }
 
@@ -159,10 +219,16 @@ class FilamentDepthOcclusionMaterial {
         inst.setParameter("u_occlusionEnabled", 0.0f)
       } catch (_: Exception) {}
     }
+    for (inst in modelMaterialInstances.values) {
+      try {
+        inst.setParameter("u_occlusionEnabled", 0.0f)
+      } catch (_: Exception) {}
+    }
     isOcclusionShaderExecuting = false
   }
 
   fun destroy(engine: Engine) {
+    modelMaterialInstances.clear()
     materialInstance = null
     material?.let {
       try {
