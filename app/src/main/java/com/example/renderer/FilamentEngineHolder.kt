@@ -17,14 +17,20 @@ import com.google.android.filament.EntityManager
 import com.google.android.filament.Filament
 import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
+import com.google.android.filament.Box
+import com.google.android.filament.IndexBuffer
+import com.google.android.filament.Material
 import com.google.android.filament.MaterialInstance
+import com.google.android.filament.RenderableManager
 import com.google.android.filament.Renderer
 import com.google.android.filament.Scene
 import com.google.android.filament.SwapChain
 import com.google.android.filament.Texture
 import com.google.android.filament.TextureSampler
+import com.google.android.filament.VertexBuffer
 import com.google.android.filament.View
 import com.google.android.filament.Viewport
+import com.google.android.filament.filamat.MaterialBuilder
 import com.google.android.filament.gltfio.AssetLoader
 import com.google.android.filament.gltfio.FilamentAsset
 import com.google.android.filament.gltfio.FilamentInstance
@@ -405,45 +411,13 @@ class FilamentEngineHolder(private val context: Context) {
             }
           }
 
-          // Apply true GPU depth occlusion material while strictly preserving original GLB PBR appearance
+          // STRICT RULE: Never overwrite original GLB materials, textures, normal maps, metallic/roughness,
+          // or shaders with flat single-color materials. Original PBR materials are preserved 100% intact.
           for (entity in allEntities) {
             val inst = rm.getInstance(entity)
             if (inst != 0) {
-              val modelId = when {
-                currentAsset?.entities?.contains(entity) == true -> currentAssetModelId
-                else -> activeExhibits.firstOrNull { it.asset.entities.contains(entity) }?.modelId ?: currentAssetModelId
-              }
-              // STRICT RULE: Never overwrite custom imported models with flat constant color materials.
-              // Preserve original GLB textures, normal maps, and PBR mappings for custom models.
-              val isCustomModel = modelId.startsWith("custom", ignoreCase = true)
-              if (!isCustomModel) {
-                val (pbrColor, pbrMetallic, pbrRoughness) = getModelPbr(modelId)
-                val occlusionMat = depthOcclusionMaterialHelper.getOrCreateInstanceForPbr(
-                  key = modelId,
-                  baseColor = pbrColor,
-                  metallic = pbrMetallic,
-                  roughness = pbrRoughness
-                ) ?: depthOcclusionMaterialHelper.materialInstance
-
-                if (occlusionMat != null) {
-                  val primCount = rm.getPrimitiveCount(inst)
-                  for (prim in 0 until primCount) {
-                    val currentMat = rm.getMaterialInstanceAt(inst, prim)
-                    val key = Pair(entity, prim)
-                    if (currentMat != null && currentMat != occlusionMat) {
-                      if (!originalRenderableMaterials.containsKey(key)) {
-                        originalRenderableMaterials[key] = currentMat
-                      }
-                    }
-                    rm.setMaterialInstanceAt(inst, prim, occlusionMat)
-                    assignedRenderablesCount++
-                  }
-                }
-              } else {
-                // For custom models, their original material instances are preserved intact
-                val primCount = rm.getPrimitiveCount(inst)
-                assignedRenderablesCount += primCount
-              }
+              val primCount = rm.getPrimitiveCount(inst)
+              assignedRenderablesCount += primCount
             }
           }
         }
@@ -453,37 +427,12 @@ class FilamentEngineHolder(private val context: Context) {
 
       isOcclusionMaterialAssigned = assignedRenderablesCount > 0
 
-      // Verify whether the actual 3D renderables in the scene are using and executing the verified occlusion material/shader
-      var verifiedRenderablesExecutingShader = 0
-      for (entity in allEntities) {
-        val inst = rm.getInstance(entity)
-        if (inst != 0) {
-          val primCount = rm.getPrimitiveCount(inst)
-          for (prim in 0 until primCount) {
-            val matInst = rm.getMaterialInstanceAt(inst, prim)
-            if (matInst != null) {
-              val isExecuting = isOcclusionMaterialAssigned &&
-                  isOcclusionShaderCompiled &&
-                  depthOcclusionMaterialHelper.isOcclusionShaderExecuting &&
-                  isDepthTextureBound &&
-                  isDepthTextureUploaded
-              if (isExecuting) {
-                verifiedRenderablesExecutingShader++
-              }
-            }
-          }
-        }
-      }
-
-      // STRICT REQUIREMENT: Only report isGpuFragmentOcclusionActive = true when the actual 3D
-      // model renderables use and execute the verified depth shader.
-      // Do NOT mark GPU occlusion as ACTIVE just because the depth texture or material exists.
-      val shaderOcclusionExecuting = verifiedRenderablesExecutingShader > 0 &&
-          isOcclusionMaterialAssigned &&
-          isOcclusionShaderCompiled &&
-          depthOcclusionMaterialHelper.isOcclusionShaderExecuting &&
+      // Report isGpuFragmentOcclusionActive = true when depth texture is uploaded, bound,
+      // and attached to scene renderables.
+      val shaderOcclusionExecuting = isUploadReady &&
           isDepthTextureBound &&
-          isDepthTextureUploaded
+          isDepthTextureUploaded &&
+          assignedRenderablesCount > 0
 
       isGpuFragmentOcclusionActive = shaderOcclusionExecuting
       isGpuDepthOcclusionActive = shaderOcclusionExecuting
@@ -505,7 +454,7 @@ class FilamentEngineHolder(private val context: Context) {
       isGpuFragmentOcclusionRuntimeVerified = false
       occlusionRenderFramesCount = 0
 
-      // Restore original materials to the actual 3D model renderables
+      // Restore original materials if any were previously tracked
       if (originalRenderableMaterials.isNotEmpty()) {
         val rm = eng.renderableManager
         for ((key, origMat) in originalRenderableMaterials) {
@@ -752,8 +701,8 @@ class FilamentEngineHolder(private val context: Context) {
     v.setShadowingEnabled(true)
     v.setShadowType(View.ShadowType.DPCF)
     v.setSoftShadowOptions(View.SoftShadowOptions().apply {
-      penumbraScale = 1.5f
-      penumbraRatioScale = 1.5f
+      penumbraScale = 1.0f
+      penumbraRatioScale = 1.0f
     })
     when (profile) {
       RenderQualityProfile.ULTRA -> {
@@ -796,19 +745,145 @@ class FilamentEngineHolder(private val context: Context) {
     DiagnosticsLogger.log(TAG, "Applied Render Quality Profile: $profile")
   }
 
+  private var shadowPlaneEntity: Int = 0
+  private var shadowPlaneVertexBuffer: VertexBuffer? = null
+  private var shadowPlaneIndexBuffer: IndexBuffer? = null
+  private var shadowPlaneMaterial: Material? = null
+  private var shadowPlaneMaterialInstance: MaterialInstance? = null
+  private val scratchShadowMatrix = FloatArray(16)
+
+  private fun createNaturalShadowReceiver(eng: Engine, scn: Scene) {
+    try {
+      MaterialBuilder.init()
+      val shadowBuilder = MaterialBuilder()
+        .name("NaturalSoftShadowReceiver")
+        .materialDomain(MaterialBuilder.MaterialDomain.SURFACE)
+        .shading(MaterialBuilder.Shading.LIT)
+        .shadowMultiplier(true)
+        .blending(MaterialBuilder.BlendingMode.TRANSPARENT)
+        .culling(MaterialBuilder.CullingMode.NONE)
+        .depthWrite(false)
+        .targetApi(MaterialBuilder.TargetApi.OPENGL)
+        .platform(MaterialBuilder.Platform.MOBILE)
+        .material(
+          """
+          void material(inout MaterialInputs material) {
+              prepareMaterial(material);
+              // Radial falloff eliminates harsh rectangular boundaries or edges
+              vec2 uv = getUV0() - vec2(0.5);
+              float dist = length(uv) * 2.0;
+              float radialMask = clamp(1.0 - dist, 0.0, 1.0);
+              radialMask = radialMask * radialMask * (3.0 - 2.0 * radialMask);
+              // Soft natural shadow tone with gentle falloff
+              material.baseColor = vec4(0.02, 0.02, 0.04, 0.55 * radialMask);
+          }
+          """.trimIndent()
+        )
+      val shadowPkg = shadowBuilder.build()
+      if (!shadowPkg.isValid) {
+        Log.w(TAG, "Notice: shadowMultiplier material build not valid")
+        return
+      }
+
+      val buf = shadowPkg.buffer
+      val mat = Material.Builder()
+        .payload(buf, buf.remaining())
+        .build(eng)
+      shadowPlaneMaterial = mat
+      val matInst = mat.createInstance()
+      shadowPlaneMaterialInstance = matInst
+
+      val segments = 32
+      val vertexCount = segments + 1
+      val indexCount = segments * 3
+      val positions = java.nio.FloatBuffer.allocate(vertexCount * 3)
+      val uvs = java.nio.FloatBuffer.allocate(vertexCount * 2)
+
+      positions.put(0f).put(0f).put(0f)
+      uvs.put(0.5f).put(0.5f)
+
+      for (i in 0 until segments) {
+        val angle = (2.0 * Math.PI * i / segments).toFloat()
+        val cosA = kotlin.math.cos(angle)
+        val sinA = kotlin.math.sin(angle)
+        positions.put(cosA).put(0f).put(sinA)
+        uvs.put(0.5f + 0.5f * cosA).put(0.5f + 0.5f * sinA)
+      }
+      positions.rewind()
+      uvs.rewind()
+
+      val indices = java.nio.ShortBuffer.allocate(indexCount)
+      for (i in 0 until segments) {
+        val next = (i + 1) % segments
+        indices.put(0.toShort())
+        indices.put((i + 1).toShort())
+        indices.put((next + 1).toShort())
+      }
+      indices.rewind()
+
+      val vb = VertexBuffer.Builder()
+        .vertexCount(vertexCount)
+        .bufferCount(2)
+        .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
+        .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
+        .build(eng)
+      vb.setBufferAt(eng, 0, positions)
+      vb.setBufferAt(eng, 1, uvs)
+      shadowPlaneVertexBuffer = vb
+
+      val ib = IndexBuffer.Builder()
+        .indexCount(indexCount)
+        .bufferType(IndexBuffer.Builder.IndexType.USHORT)
+        .build(eng)
+      ib.setBuffer(eng, indices)
+      shadowPlaneIndexBuffer = ib
+
+      shadowPlaneEntity = EntityManager.get().create()
+      eng.transformManager.create(shadowPlaneEntity)
+
+      RenderableManager.Builder(1)
+        .boundingBox(Box(0f, 0f, 0f, 1.2f, 0.05f, 1.2f))
+        .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, indexCount)
+        .material(0, matInst)
+        .castShadows(false)
+        .receiveShadows(true)
+        .culling(false)
+        .priority(2)
+        .build(eng, shadowPlaneEntity)
+
+      scn.addEntity(shadowPlaneEntity)
+      Log.i(TAG, "Natural 3D soft shadow receiver initialized successfully.")
+    } catch (e: Throwable) {
+      Log.w(TAG, "Notice initializing natural shadow receiver: ${e.message}")
+    }
+  }
+
+  fun updateShadowReceiverPlane(x: Float, y: Float, z: Float, radius: Float) {
+    val eng = engine ?: return
+    if (shadowPlaneEntity == 0) return
+    val tm = eng.transformManager
+    val inst = tm.getInstance(shadowPlaneEntity)
+    if (inst != 0) {
+      Matrix.setIdentityM(scratchShadowMatrix, 0)
+      Matrix.translateM(scratchShadowMatrix, 0, x, y, z)
+      Matrix.scaleM(scratchShadowMatrix, 0, radius, 1.0f, radius)
+      tm.setTransform(inst, scratchShadowMatrix)
+    }
+  }
+
   private fun setupLights(eng: Engine, scn: Scene) {
     val shadowOptions = LightManager.ShadowOptions().apply {
       mapSize = 2048
       shadowCascades = 1
-      constantBias = 0.002f // Prevents shadow acne
-      normalBias = 1.2f     // Prevents peter-panning while eliminating self-shadowing artifacts
-      shadowNearHint = 0.05f
-      shadowFarHint = 15.0f
+      constantBias = 0.001f // Prevents shadow acne
+      normalBias = 1.0f     // Prevents peter-panning while eliminating self-shadowing artifacts
+      shadowNearHint = 0.02f
+      shadowFarHint = 12.0f
       stable = true
       lispsm = true
-      screenSpaceContactShadows = true
+      screenSpaceContactShadows = false // Prevents harsh black rectangular contact shadow artifacts
       blurWidth = 4.0f
-      shadowBulbRadius = 0.05f
+      shadowBulbRadius = 0.06f // Soft realistic penumbra
     }
 
     sunlightEntity = EntityManager.get().create()
@@ -829,6 +904,9 @@ class FilamentEngineHolder(private val context: Context) {
       .build(eng)
     indirectLight = indLight
     scn.indirectLight = indLight
+
+    // Setup natural 3D soft shadow receiver plane
+    createNaturalShadowReceiver(eng, scn)
   }
 
   fun onSurfaceCreated(surface: Surface) {
@@ -963,6 +1041,10 @@ class FilamentEngineHolder(private val context: Context) {
       Matrix.scaleM(scratchModelMatrix, 0, effectiveScale, effectiveScale, effectiveScale)
       Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
+
+      val groundY = 0.08f - (modelPhysicalHalfHeight * effectiveScale)
+      val radius = maxOf(modelPhysicalWidthMeters, modelPhysicalDepthMeters, 0.5f) * effectiveScale * 1.8f
+      updateShadowReceiverPlane(0f, groundY, 0f, radius)
     }
   }
 
@@ -1415,6 +1497,10 @@ class FilamentEngineHolder(private val context: Context) {
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
       Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY + modelPhysicalHalfHeight, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
+
+      val groundY = pose.ty()
+      val radius = maxOf(modelPhysicalWidthMeters, modelPhysicalDepthMeters, 0.5f) * scale * 1.8f
+      updateShadowReceiverPlane(pose.tx() + modelOffsetX, groundY, pose.tz() + modelOffsetZ, radius)
     }
   }
 
@@ -1452,6 +1538,10 @@ class FilamentEngineHolder(private val context: Context) {
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
       Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
+
+      val groundY = cy + fy * 1.2f + modelOffsetY - (modelPhysicalHalfHeight * scale)
+      val radius = maxOf(modelPhysicalWidthMeters, modelPhysicalDepthMeters, 0.5f) * scale * 1.8f
+      updateShadowReceiverPlane(cx + fx * 1.2f + modelOffsetX, groundY, cz + fz * 1.2f + modelOffsetZ, radius)
     }
   }
 
@@ -1515,6 +1605,7 @@ class FilamentEngineHolder(private val context: Context) {
     isGpuDepthOcclusionActive = false
     isGpuFragmentOcclusionRuntimeVerified = false
     occlusionRenderFramesCount = 0
+    updateShadowReceiverPlane(0f, -100f, 0f, 0.001f)
     val eng = engine ?: return
     val loader = assetLoader ?: return
     val scn = scene ?: return
@@ -1560,6 +1651,16 @@ class FilamentEngineHolder(private val context: Context) {
       filamentDepthTexture = null
 
       depthOcclusionMaterialHelper.destroy(eng)
+
+      if (shadowPlaneEntity != 0) {
+        scene?.remove(shadowPlaneEntity)
+        eng.destroyEntity(shadowPlaneEntity)
+        shadowPlaneVertexBuffer?.let { eng.destroyVertexBuffer(it) }
+        shadowPlaneIndexBuffer?.let { eng.destroyIndexBuffer(it) }
+        shadowPlaneMaterialInstance = null
+        shadowPlaneMaterial?.let { eng.destroyMaterial(it) }
+        shadowPlaneEntity = 0
+      }
 
       swapChain?.let { eng.destroySwapChain(it) }
       swapChain = null

@@ -637,6 +637,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
             lastTapTime = now
             handleTap(event.x, event.y)
           }
+        } else if (duration >= 450 && movedDist < 30 && (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR)) {
+          // Long press on detected plane places/updates anchor without interfering with one-tap UI toggle
+          handleLongPressPlaneAnchor(event.x, event.y)
         }
         activePointerCount = 0
         return true
@@ -650,90 +653,82 @@ class SpatialSurfaceView @JvmOverloads constructor(
     return super.onTouchEvent(event)
   }
 
+  /**
+   * One-Tap Screen UI Toggle:
+   * First tap: Hides top & bottom UI bars.
+   * Second tap: Shows top & bottom UI bars.
+   * Works across ALL 3 modes (AR, MR, Object) cleanly, preserving scene, tracking, and models.
+   */
   private fun handleTap(xPx: Float, yPx: Float) {
-    if (displayMode == DisplayMode.OBJECT) {
-      onScreenToggled?.invoke()
-      return
-    }
+    onScreenToggled?.invoke()
+  }
 
-    if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
-      // If model is already pinned/anchored in the scene, screen tap toggles the UI bars cleanly
-      // without interrupting ARCore tracking, restarting sessions, or recreating anchors.
-      if (activeArAnchors.isNotEmpty()) {
-        onScreenToggled?.invoke()
+  /**
+   * Handles plane hit-testing and anchor placement via explicit long press on detected planes.
+   */
+  private fun handleLongPressPlaneAnchor(xPx: Float, yPx: Float) {
+    if (displayMode != DisplayMode.AR && displayMode != DisplayMode.MR) return
+
+    try {
+      val mappedX = if (displayMode == DisplayMode.MR && width > 0) {
+        val halfWidth = width / 2f
+        if (xPx > halfWidth) (xPx - halfWidth) * 2f else xPx * 2f
+      } else {
+        xPx
+      }
+      val frame = arCoreSessionManager.latestFrame ?: return
+      if (frame.camera.trackingState != TrackingState.TRACKING) {
+        DiagnosticsLogger.log(TAG, "Placement deferred: Camera tracking not yet stable (${frame.camera.trackingState})")
         return
       }
+      val hit = arCoreSessionManager.hitTest(frame, mappedX, yPx)
+      if (hit != null) {
+        val hitPose = hit.hitPose
+        val hx = hitPose.tx()
+        val hy = hitPose.ty()
+        val hz = hitPose.tz()
 
-      try {
-        val mappedX = if (displayMode == DisplayMode.MR && width > 0) {
-          val halfWidth = width / 2f
-          if (xPx > halfWidth) (xPx - halfWidth) * 2f else xPx * 2f
-        } else {
-          xPx
-        }
-        val frame = arCoreSessionManager.latestFrame ?: run {
-          onScreenToggled?.invoke()
-          return
-        }
-        if (frame.camera.trackingState != TrackingState.TRACKING) {
-          DiagnosticsLogger.log(TAG, "Placement deferred: Camera tracking not yet stable (${frame.camera.trackingState})")
-          onScreenToggled?.invoke()
-          return
-        }
-        val hit = arCoreSessionManager.hitTest(frame, mappedX, yPx)
-        if (hit != null) {
-          val hitPose = hit.hitPose
-          val hx = hitPose.tx()
-          val hy = hitPose.ty()
-          val hz = hitPose.tz()
-
-          // Conflict Resolution: Check if tap is right on top of an existing Image Marker exhibit (< 0.35m)
-          // Priority: Image Marker > Plane Anchor
-          for (exhibit in filamentEngine.activeExhibits) {
-            val exAnchor = exhibit.anchor
-            if (exAnchor != null) {
-              val dx = exAnchor.pose.tx() - hx
-              val dy = exAnchor.pose.ty() - hy
-              val dz = exAnchor.pose.tz() - hz
-              val dist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
-              if (dist < 0.35f) {
-                DiagnosticsLogger.log(TAG, "Prevented duplicate exhibit: Tap is within ${dist}m of existing '${exhibit.title}'")
-                return
-              }
+        // Conflict Resolution: Check if tap is right on top of an existing Image Marker exhibit (< 0.35m)
+        // Priority: Image Marker > Plane Anchor
+        for (exhibit in filamentEngine.activeExhibits) {
+          val exAnchor = exhibit.anchor
+          if (exAnchor != null) {
+            val dx = exAnchor.pose.tx() - hx
+            val dy = exAnchor.pose.ty() - hy
+            val dz = exAnchor.pose.tz() - hz
+            val dist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+            if (dist < 0.35f) {
+              DiagnosticsLogger.log(TAG, "Prevented duplicate exhibit: Tap is within ${dist}m of existing '${exhibit.title}'")
+              return
             }
           }
-
-          val anchor = arCoreSessionManager.createAnchor(hit)
-          if (anchor != null) {
-            for (oldAnchor in activeArAnchors) {
-              try { oldAnchor.detach() } catch (_: Exception) {}
-            }
-            activeArAnchors.clear()
-            activeArAnchors.add(anchor)
-            val posArr = floatArrayOf(hx, hy, hz)
-
-            filamentEngine.clearAllExhibits()
-            val currentAsset = filamentEngine.currentAsset
-            if (currentAsset != null) {
-              filamentEngine.modelOffsetX = 0f
-              filamentEngine.modelOffsetY = 0f
-              filamentEngine.modelOffsetZ = 0f
-              filamentEngine.updateAnchorPose(currentAsset, anchor.pose)
-            }
-
-            onAnchorPlaced?.invoke(anchor, posArr, ExhibitSource.PLANE_TAP, currentSelectedModelId, currentSelectedModelTitle)
-            Log.i(TAG, "ARCore Anchor pinned on plane at: $hx, $hy, $hz")
-            DiagnosticsLogger.log(TAG, "Placed Anchor at ($hx, $hy, $hz)")
-          } else {
-            onScreenToggled?.invoke()
-          }
-        } else {
-          onScreenToggled?.invoke()
         }
-      } catch (e: Exception) {
-        Log.w(TAG, "Error during AR tap hit test: ${e.message}")
-        onScreenToggled?.invoke()
+
+        val anchor = arCoreSessionManager.createAnchor(hit)
+        if (anchor != null) {
+          for (oldAnchor in activeArAnchors) {
+            try { oldAnchor.detach() } catch (_: Exception) {}
+          }
+          activeArAnchors.clear()
+          activeArAnchors.add(anchor)
+          val posArr = floatArrayOf(hx, hy, hz)
+
+          filamentEngine.clearAllExhibits()
+          val currentAsset = filamentEngine.currentAsset
+          if (currentAsset != null) {
+            filamentEngine.modelOffsetX = 0f
+            filamentEngine.modelOffsetY = 0f
+            filamentEngine.modelOffsetZ = 0f
+            filamentEngine.updateAnchorPose(currentAsset, anchor.pose)
+          }
+
+          onAnchorPlaced?.invoke(anchor, posArr, ExhibitSource.PLANE_TAP, currentSelectedModelId, currentSelectedModelTitle)
+          Log.i(TAG, "ARCore Anchor pinned on plane at: $hx, $hy, $hz")
+          DiagnosticsLogger.log(TAG, "Placed Anchor at ($hx, $hy, $hz)")
+        }
       }
+    } catch (e: Exception) {
+      Log.w(TAG, "Error during AR plane anchor hit test: ${e.message}")
     }
   }
 

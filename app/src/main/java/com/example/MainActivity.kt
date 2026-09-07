@@ -172,14 +172,30 @@ fun MixedRealityScreen(
     activity?.window?.let { WindowCompat.getInsetsController(it, it.decorView) }
   }
 
+  // Startup Splash Screen State: Displays a clean full-screen white canvas with the app logo,
+  // transitioning smoothly into MainActivity without delaying app initialization.
+  var isSplashVisible by remember { mutableStateOf(true) }
+  LaunchedEffect(Unit) {
+    kotlinx.coroutines.delay(400)
+    isSplashVisible = false
+  }
+
   // Manage Android System Bars (Status & Navigation Bars) dynamically
-  LaunchedEffect(uiVisibilityState) {
+  LaunchedEffect(uiVisibilityState, isSplashVisible) {
     insetsController?.let { controller ->
-      if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI) {
-        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(WindowInsetsCompat.Type.systemBars())
-      } else {
+      if (isSplashVisible) {
+        controller.isAppearanceLightStatusBars = true
+        controller.isAppearanceLightNavigationBars = true
         controller.show(WindowInsetsCompat.Type.systemBars())
+      } else {
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
+        if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI) {
+          controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+          controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+          controller.show(WindowInsetsCompat.Type.systemBars())
+        }
       }
     }
   }
@@ -260,14 +276,6 @@ fun MixedRealityScreen(
       }
       onSurfaceViewCreated(this)
     }
-  }
-
-  // Startup Splash Screen State: Displays a clean full-screen white canvas with the app logo,
-  // transitioning smoothly into MainActivity without delaying app initialization.
-  var isSplashVisible by remember { mutableStateOf(true) }
-  LaunchedEffect(Unit) {
-    kotlinx.coroutines.delay(400)
-    isSplashVisible = false
   }
 
   val isAssetLoading by viewModel.isAssetLoading.collectAsState()
