@@ -100,6 +100,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private val rotateGestureDetector: TwoFingerRotateDetector
   private var lastTouchX = 0f
   private var lastTouchY = 0f
+  private var lastMidX = 0f
+  private var lastMidY = 0f
   private var activePointerCount = 0
   private var touchStartTime = 0L
 
@@ -177,12 +179,10 @@ class SpatialSurfaceView @JvmOverloads constructor(
       object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
           val scaleFactor = detector.scaleFactor
-          if (displayMode == DisplayMode.OBJECT) {
-            filamentEngine.orbitDistance = (filamentEngine.orbitDistance / scaleFactor).coerceIn(1.0f, 6.0f)
-            filamentEngine.modelScale = (filamentEngine.modelScale * scaleFactor).coerceIn(0.01f, 25.0f)
-          } else {
-            filamentEngine.modelScale = (filamentEngine.modelScale * scaleFactor).coerceIn(0.01f, 25.0f)
-          }
+          filamentEngine.modelScale = (filamentEngine.modelScale * scaleFactor).coerceIn(
+            FilamentEngineHolder.MIN_MODEL_SCALE,
+            FilamentEngineHolder.MAX_MODEL_SCALE
+          )
           return true
         }
       }
@@ -568,7 +568,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   override fun onTouchEvent(event: MotionEvent): Boolean {
-    val isRotating = rotateGestureDetector.onTouchEvent(event)
+    rotateGestureDetector.onTouchEvent(event)
     scaleGestureDetector.onTouchEvent(event)
 
     when (event.actionMasked) {
@@ -582,27 +582,47 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
       MotionEvent.ACTION_POINTER_DOWN -> {
         activePointerCount = event.pointerCount
+        if (event.pointerCount == 2) {
+          lastMidX = (event.getX(0) + event.getX(1)) * 0.5f
+          lastMidY = (event.getY(0) + event.getY(1)) * 0.5f
+        }
         return true
       }
 
       MotionEvent.ACTION_MOVE -> {
-        if (!scaleGestureDetector.isInProgress && !isRotating) {
+        if (event.pointerCount == 1) {
           val dx = event.x - lastTouchX
           val dy = event.y - lastTouchY
 
-          if (event.pointerCount == 1) {
+          if (displayMode == DisplayMode.OBJECT) {
+            filamentEngine.orbitYaw -= dx * 0.45f
+            filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dy * 0.45f).coerceIn(-80f, 80f)
+          } else {
+            // 1 finger = Y-axis Yaw (horizontal) and X-axis Pitch (vertical) rotation with full 360-degree range
+            filamentEngine.modelRotationDegrees -= dx * 0.45f
+            filamentEngine.modelPitchDegrees += dy * 0.45f
+          }
+          lastTouchX = event.x
+          lastTouchY = event.y
+        } else if (event.pointerCount == 2) {
+          val midX = (event.getX(0) + event.getX(1)) * 0.5f
+          val midY = (event.getY(0) + event.getY(1)) * 0.5f
+          val dMidX = midX - lastMidX
+          val dMidY = midY - lastMidY
+
+          // 2 fingers = Move / Reposition / Pan when not actively scaling or twisting
+          if (!scaleGestureDetector.isInProgress && !rotateGestureDetector.isActivelyTwisting) {
             if (displayMode == DisplayMode.OBJECT) {
-              filamentEngine.orbitYaw -= dx * 0.45f
-              filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dy * 0.45f).coerceIn(-80f, 80f)
+              filamentEngine.panX = (filamentEngine.panX + dMidX * 0.003f).coerceIn(-0.35f, 0.35f)
+              filamentEngine.panY = (filamentEngine.panY - dMidY * 0.003f).coerceIn(-0.25f, 0.25f)
             } else {
-              // 1 finger = Move / Reposition across AR & MR
-              filamentEngine.modelOffsetX += dx * 0.0025f
-              filamentEngine.modelOffsetY -= dy * 0.0025f
+              filamentEngine.modelOffsetX += dMidX * 0.0025f
+              filamentEngine.modelOffsetY -= dMidY * 0.0025f
             }
           }
+          lastMidX = midX
+          lastMidY = midY
         }
-        lastTouchX = event.x
-        lastTouchY = event.y
         return true
       }
 

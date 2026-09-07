@@ -161,7 +161,7 @@ fun DiagnosticsHud(
         modifier = Modifier.fillMaxWidth()
       ) {
         Text(
-          text = "Planes: H:${telemetry.horizontalPlanesCount} V:${telemetry.verticalPlanesCount} | Images: ${telemetry.trackedImagesCount} | Anchors: ${telemetry.activeAnchorsCount}",
+          text = "Planes: H:${telemetry.horizontalPlanesCount} V:${telemetry.verticalPlanesCount} | Pts: ${telemetry.pointCloudPointsCount} | Images: ${telemetry.trackedImagesCount} | Anchors: ${telemetry.activeAnchorsCount}",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
           color = Color(0xFF94A3B8)

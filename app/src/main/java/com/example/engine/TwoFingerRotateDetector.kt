@@ -13,6 +13,8 @@ class TwoFingerRotateDetector(
 
   private var initialAngle: Float = 0f
   private var isRotating: Boolean = false
+  var isActivelyTwisting: Boolean = false
+    private set
 
   fun onTouchEvent(event: MotionEvent): Boolean {
     when (event.actionMasked) {
@@ -20,6 +22,7 @@ class TwoFingerRotateDetector(
         if (event.pointerCount == 2) {
           initialAngle = calculateAngle(event)
           isRotating = true
+          isActivelyTwisting = false
         }
       }
       MotionEvent.ACTION_MOVE -> {
@@ -34,16 +37,21 @@ class TwoFingerRotateDetector(
           if (Math.abs(delta) > 0.5f) {
             onRotateListener(delta)
             initialAngle = currentAngle
+            isActivelyTwisting = Math.abs(delta) > 1.2f
+          } else {
+            isActivelyTwisting = false
           }
         }
       }
       MotionEvent.ACTION_POINTER_UP -> {
         if (event.pointerCount <= 2) {
           isRotating = false
+          isActivelyTwisting = false
         }
       }
       MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_UP -> {
         isRotating = false
+        isActivelyTwisting = false
       }
     }
     return isRotating

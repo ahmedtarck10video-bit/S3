@@ -813,7 +813,15 @@ class ArCoreSessionManager(private val context: Context) {
       return orientedPointHit
     }
 
-    // 4. Do NOT allow accidental placement from noisy unoriented feature points
+    // 4. Feature point fallback (equivalent to ARKit featurePoint hit-test capability)
+    val genericFeaturePointHit = hits.firstOrNull { hit ->
+      val trackable = hit.trackable
+      trackable is com.google.ar.core.Point && trackable.trackingState == TrackingState.TRACKING
+    }
+    if (genericFeaturePointHit != null) {
+      return genericFeaturePointHit
+    }
+
     return null
   }
 
