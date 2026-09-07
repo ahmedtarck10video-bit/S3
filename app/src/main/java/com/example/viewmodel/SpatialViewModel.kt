@@ -480,6 +480,7 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         hasReal3dMeshGeometry = trackingData.reconstructionTelemetry.hasReal3dMeshGeometry,
         streetscapeGeometriesCount = trackingData.reconstructionTelemetry.streetscapeGeometriesCount,
         denseMeshChunksCount = trackingData.reconstructionTelemetry.denseMeshChunksCount,
+        pointCloudPointsCount = trackingData.pointCloudPointsCount,
         isDenseLocalMeshActive = trackingData.reconstructionTelemetry.isDenseLocalMeshActive,
         isValidatedLocalSceneMesh = trackingData.reconstructionTelemetry.isValidatedLocalSceneMesh,
         isFull3dSceneReconstruction = trackingData.reconstructionTelemetry.isFull3dSceneReconstruction,

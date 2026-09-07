@@ -81,6 +81,8 @@ data class ArCoreTrackingData(
   val cameraPose: Pose? = null,
   val cameraPosition: FloatArray = floatArrayOf(0f, 0f, 0f),
   val walkingDisplacementMeters: Float = 0f,
+  val pointCloudPointsCount: Int = 0,
+  val pointCloudTimestampNs: Long = 0L,
   val isDepthSupported: Boolean = false,
   val isDepthEnabled: Boolean = false,
   val isInstantPlacementEnabled: Boolean = true,
@@ -534,6 +536,20 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
+      // Process Direct ARCore Point Cloud
+      var pointCloudPointsCount = 0
+      var pointCloudTimestampNs = 0L
+      try {
+        val pointCloud = frame.acquirePointCloud()
+        try {
+          val pointsBuffer = pointCloud.points
+          pointCloudPointsCount = pointsBuffer.remaining() / 4
+          pointCloudTimestampNs = pointCloud.timestamp
+        } finally {
+          pointCloud.close()
+        }
+      } catch (_: Exception) {}
+
       // 1. Collect Planes
       val allPlanes = currentSession.getAllTrackables(Plane::class.java)
       var hPlanes = 0
@@ -660,6 +676,8 @@ class ArCoreSessionManager(private val context: Context) {
         cameraPose = camPose,
         cameraPosition = scratchCamPos,
         walkingDisplacementMeters = totalWalkingDisplacement,
+        pointCloudPointsCount = pointCloudPointsCount,
+        pointCloudTimestampNs = pointCloudTimestampNs,
         isDepthSupported = currentSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC),
         isDepthEnabled = currentSession.config.depthMode == Config.DepthMode.AUTOMATIC,
         isInstantPlacementEnabled = true,
@@ -774,6 +792,15 @@ class ArCoreSessionManager(private val context: Context) {
     if (tentativeInstant != null) {
       return tentativeInstant
     }
+
+    // Direct Instant Placement query on frame if instant placement enabled
+    try {
+      val instantHitsDirect = frame.hitTestInstantPlacement(xPx, yPx, 1.5f)
+      val directHit = instantHitsDirect.firstOrNull()
+      if (directHit != null) {
+        return directHit
+      }
+    } catch (_: Throwable) {}
 
     // Oriented feature points with estimated surface normal
     val orientedPointHit = hits.firstOrNull { hit ->

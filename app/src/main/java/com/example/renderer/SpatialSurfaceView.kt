@@ -138,8 +138,6 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private val anchorLastKnownPoses = mutableMapOf<Int, Pose>()
 
   // Gesture state: seamless finger interaction for Rotate, Move, and Scale
-  private var isOneFingerRotateMode: Boolean = false
-  private var lastTapTime: Long = 0L
   private var consecutiveNullFrames: Int = 0
 
   private var sensorPitch = 0f
@@ -181,9 +179,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val scaleFactor = detector.scaleFactor
           if (displayMode == DisplayMode.OBJECT) {
             filamentEngine.orbitDistance = (filamentEngine.orbitDistance / scaleFactor).coerceIn(1.0f, 6.0f)
-            filamentEngine.modelScale = (filamentEngine.modelScale * scaleFactor).coerceIn(0.1f, 8.0f)
+            filamentEngine.modelScale = (filamentEngine.modelScale * scaleFactor).coerceIn(0.01f, 25.0f)
           } else {
-            filamentEngine.modelScale = (filamentEngine.modelScale * scaleFactor).coerceIn(0.1f, 8.0f)
+            filamentEngine.modelScale = (filamentEngine.modelScale * scaleFactor).coerceIn(0.01f, 25.0f)
           }
           return true
         }
@@ -597,25 +595,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
               filamentEngine.orbitYaw -= dx * 0.45f
               filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dy * 0.45f).coerceIn(-80f, 80f)
             } else {
-              // AR & MR: When model is placed/anchored, 1-finger gesture smoothly rotates in place
-              if (activeArAnchors.isNotEmpty()) {
-                filamentEngine.modelRotationDegrees -= dx * 0.45f
-              } else {
-                if (isOneFingerRotateMode || lastTouchY > height * 0.72f) {
-                  filamentEngine.modelRotationDegrees -= dx * 0.45f
-                } else {
-                  filamentEngine.modelOffsetX += dx * 0.0025f
-                  filamentEngine.modelOffsetY -= dy * 0.0025f
-                }
-              }
-            }
-          } else if (event.pointerCount == 2) {
-            if (displayMode == DisplayMode.OBJECT) {
-              filamentEngine.panX = (filamentEngine.panX + dx * 0.003f).coerceIn(-0.35f, 0.35f)
-              filamentEngine.panY = (filamentEngine.panY - dy * 0.003f).coerceIn(-0.25f, 0.25f)
-            } else {
-              // AR & MR: 2-finger horizontal drag rotates
-              filamentEngine.modelRotationDegrees -= dx * 0.45f
+              // 1 finger = Move / Reposition across AR & MR
+              filamentEngine.modelOffsetX += dx * 0.0025f
+              filamentEngine.modelOffsetY -= dy * 0.0025f
             }
           }
         }
@@ -628,15 +610,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
         val duration = System.currentTimeMillis() - touchStartTime
         val movedDist = abs(event.x - lastTouchX) + abs(event.y - lastTouchY)
         if (duration < 300 && movedDist < 20) {
-          val now = System.currentTimeMillis()
-          if (now - lastTapTime < 350) {
-            // Double-tap toggles between Move (Right/Left & Up/Down) and Rotate (360° spin)
-            isOneFingerRotateMode = !isOneFingerRotateMode
-            lastTapTime = 0L
-          } else {
-            lastTapTime = now
-            handleTap(event.x, event.y)
-          }
+          handleTap(event.x, event.y)
         } else if (duration >= 450 && movedDist < 30 && (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR)) {
           // Long press on detected plane places/updates anchor without interfering with one-tap UI toggle
           handleLongPressPlaneAnchor(event.x, event.y)
@@ -647,6 +621,13 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
       MotionEvent.ACTION_POINTER_UP -> {
         activePointerCount = event.pointerCount - 1
+        // Prevent sudden jumps when transitioning from 2 fingers to 1 finger
+        val upIndex = event.actionIndex
+        val remainIndex = if (upIndex == 0) 1 else 0
+        if (remainIndex < event.pointerCount) {
+          lastTouchX = event.getX(remainIndex)
+          lastTouchY = event.getY(remainIndex)
+        }
         return true
       }
     }

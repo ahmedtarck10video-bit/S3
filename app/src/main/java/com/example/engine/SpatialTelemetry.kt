@@ -81,6 +81,7 @@ data class TelemetryState(
   val hasReal3dMeshGeometry: Boolean = false,
   val streetscapeGeometriesCount: Int = 0,
   val denseMeshChunksCount: Int = 0,
+  val pointCloudPointsCount: Int = 0,
   val isDenseLocalMeshActive: Boolean = false,
   val isValidatedLocalSceneMesh: Boolean = false,
   val isFull3dSceneReconstruction: Boolean = false,

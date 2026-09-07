@@ -118,6 +118,9 @@ class FilamentEngineHolder(private val context: Context) {
 
   companion object {
     private const val TAG = "FilamentEngineHolder"
+    const val MIN_MODEL_SCALE = 0.01f
+    const val MAX_MODEL_SCALE = 25.0f
+    const val DEFAULT_MODEL_SCALE = 1.0f
 
     init {
       try {
@@ -578,8 +581,11 @@ class FilamentEngineHolder(private val context: Context) {
   var panX: Float = 0.0f
   var panY: Float = 0.0f
 
-  // User-controlled scale multiplier (Default 1.0 = 100% 1:1 Physical Metric Scale)
-  var modelScale: Float = 1.0f
+  // User-controlled scale multiplier (Default 1.0 = 100% 1:1 Physical Metric Scale, range 0.01f - 25.0f)
+  var modelScale: Float = DEFAULT_MODEL_SCALE
+    set(value) {
+      field = value.coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
+    }
   var modelRotationDegrees: Float = 0f
   var modelPitchDegrees: Float = 0f
   var modelOffsetX: Float = 0f
@@ -753,146 +759,20 @@ class FilamentEngineHolder(private val context: Context) {
   private val scratchShadowMatrix = FloatArray(16)
 
   private fun createNaturalShadowReceiver(eng: Engine, scn: Scene) {
-    try {
-      MaterialBuilder.init()
-      val shadowBuilder = MaterialBuilder()
-        .name("NaturalSoftShadowReceiver")
-        .materialDomain(MaterialBuilder.MaterialDomain.SURFACE)
-        .shading(MaterialBuilder.Shading.LIT)
-        .shadowMultiplier(true)
-        .blending(MaterialBuilder.BlendingMode.TRANSPARENT)
-        .culling(MaterialBuilder.CullingMode.NONE)
-        .depthWrite(false)
-        .targetApi(MaterialBuilder.TargetApi.OPENGL)
-        .platform(MaterialBuilder.Platform.MOBILE)
-        .material(
-          """
-          void material(inout MaterialInputs material) {
-              prepareMaterial(material);
-              // Radial falloff eliminates harsh rectangular boundaries or edges
-              vec2 uv = getUV0() - vec2(0.5);
-              float dist = length(uv) * 2.0;
-              float radialMask = clamp(1.0 - dist, 0.0, 1.0);
-              radialMask = radialMask * radialMask * (3.0 - 2.0 * radialMask);
-              // Soft natural shadow tone with gentle falloff
-              material.baseColor = vec4(0.02, 0.02, 0.04, 0.55 * radialMask);
-          }
-          """.trimIndent()
-        )
-      val shadowPkg = shadowBuilder.build()
-      if (!shadowPkg.isValid) {
-        Log.w(TAG, "Notice: shadowMultiplier material build not valid")
-        return
-      }
-
-      val buf = shadowPkg.buffer
-      val mat = Material.Builder()
-        .payload(buf, buf.remaining())
-        .build(eng)
-      shadowPlaneMaterial = mat
-      val matInst = mat.createInstance()
-      shadowPlaneMaterialInstance = matInst
-
-      val segments = 32
-      val vertexCount = segments + 1
-      val indexCount = segments * 3
-      val positions = java.nio.FloatBuffer.allocate(vertexCount * 3)
-      val uvs = java.nio.FloatBuffer.allocate(vertexCount * 2)
-
-      positions.put(0f).put(0f).put(0f)
-      uvs.put(0.5f).put(0.5f)
-
-      for (i in 0 until segments) {
-        val angle = (2.0 * Math.PI * i / segments).toFloat()
-        val cosA = kotlin.math.cos(angle)
-        val sinA = kotlin.math.sin(angle)
-        positions.put(cosA).put(0f).put(sinA)
-        uvs.put(0.5f + 0.5f * cosA).put(0.5f + 0.5f * sinA)
-      }
-      positions.rewind()
-      uvs.rewind()
-
-      val indices = java.nio.ShortBuffer.allocate(indexCount)
-      for (i in 0 until segments) {
-        val next = (i + 1) % segments
-        indices.put(0.toShort())
-        indices.put((i + 1).toShort())
-        indices.put((next + 1).toShort())
-      }
-      indices.rewind()
-
-      val vb = VertexBuffer.Builder()
-        .vertexCount(vertexCount)
-        .bufferCount(2)
-        .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
-        .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
-        .build(eng)
-      vb.setBufferAt(eng, 0, positions)
-      vb.setBufferAt(eng, 1, uvs)
-      shadowPlaneVertexBuffer = vb
-
-      val ib = IndexBuffer.Builder()
-        .indexCount(indexCount)
-        .bufferType(IndexBuffer.Builder.IndexType.USHORT)
-        .build(eng)
-      ib.setBuffer(eng, indices)
-      shadowPlaneIndexBuffer = ib
-
-      shadowPlaneEntity = EntityManager.get().create()
-      eng.transformManager.create(shadowPlaneEntity)
-
-      RenderableManager.Builder(1)
-        .boundingBox(Box(0f, 0f, 0f, 1.2f, 0.05f, 1.2f))
-        .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, indexCount)
-        .material(0, matInst)
-        .castShadows(false)
-        .receiveShadows(true)
-        .culling(false)
-        .priority(2)
-        .build(eng, shadowPlaneEntity)
-
-      scn.addEntity(shadowPlaneEntity)
-      Log.i(TAG, "Natural 3D soft shadow receiver initialized successfully.")
-    } catch (e: Throwable) {
-      Log.w(TAG, "Notice initializing natural shadow receiver: ${e.message}")
-    }
+    // Shadows removed per request
   }
 
   fun updateShadowReceiverPlane(x: Float, y: Float, z: Float, radius: Float) {
-    val eng = engine ?: return
-    if (shadowPlaneEntity == 0) return
-    val tm = eng.transformManager
-    val inst = tm.getInstance(shadowPlaneEntity)
-    if (inst != 0) {
-      Matrix.setIdentityM(scratchShadowMatrix, 0)
-      Matrix.translateM(scratchShadowMatrix, 0, x, y, z)
-      Matrix.scaleM(scratchShadowMatrix, 0, radius, 1.0f, radius)
-      tm.setTransform(inst, scratchShadowMatrix)
-    }
+    // Shadows removed per request
   }
 
   private fun setupLights(eng: Engine, scn: Scene) {
-    val shadowOptions = LightManager.ShadowOptions().apply {
-      mapSize = 2048
-      shadowCascades = 1
-      constantBias = 0.001f // Prevents shadow acne
-      normalBias = 1.0f     // Prevents peter-panning while eliminating self-shadowing artifacts
-      shadowNearHint = 0.02f
-      shadowFarHint = 12.0f
-      stable = true
-      lispsm = true
-      screenSpaceContactShadows = false // Prevents harsh black rectangular contact shadow artifacts
-      blurWidth = 4.0f
-      shadowBulbRadius = 0.06f // Soft realistic penumbra
-    }
-
     sunlightEntity = EntityManager.get().create()
     LightManager.Builder(LightManager.Type.DIRECTIONAL)
       .color(1.0f, 0.98f, 0.95f)
       .intensity(sunIntensity)
       .direction(-0.25f, -0.92f, -0.30f)
-      .castShadows(true)
-      .shadowOptions(shadowOptions)
+      .castShadows(false)
       .build(eng, sunlightEntity)
     scn.addEntity(sunlightEntity)
 
@@ -904,9 +784,6 @@ class FilamentEngineHolder(private val context: Context) {
       .build(eng)
     indirectLight = indLight
     scn.indirectLight = indLight
-
-    // Setup natural 3D soft shadow receiver plane
-    createNaturalShadowReceiver(eng, scn)
   }
 
   fun onSurfaceCreated(surface: Surface) {
@@ -1037,7 +914,7 @@ class FilamentEngineHolder(private val context: Context) {
         Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
       }
       val miniatureFactor = calculateObjectModeMiniatureScale()
-      val effectiveScale = (miniatureFactor * modelScale).coerceIn(0.005f, 15.0f)
+      val effectiveScale = (miniatureFactor * modelScale).coerceIn(0.01f * miniatureFactor, 25.0f * miniatureFactor)
       Matrix.scaleM(scratchModelMatrix, 0, effectiveScale, effectiveScale, effectiveScale)
       Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
@@ -1285,7 +1162,7 @@ class FilamentEngineHolder(private val context: Context) {
           Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
         }
 
-        val scale = (exhibit.customScale * modelScale).coerceIn(0.1f, 8.0f)
+        val scale = (exhibit.customScale * modelScale).coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
         Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
         Matrix.translateM(scratchModelMatrix, 0, exhibit.centerOffsetX, exhibit.centerOffsetY + exhibit.physicalHalfHeight, exhibit.centerOffsetZ)
 
@@ -1493,7 +1370,7 @@ class FilamentEngineHolder(private val context: Context) {
       if (modelPitchDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
       }
-      val scale = modelScale.coerceIn(0.1f, 8.0f)
+      val scale = modelScale.coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
       Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY + modelPhysicalHalfHeight, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
@@ -1534,7 +1411,7 @@ class FilamentEngineHolder(private val context: Context) {
       if (modelPitchDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
       }
-      val scale = modelScale.coerceIn(0.02f, 25.0f)
+      val scale = modelScale.coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
       Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
