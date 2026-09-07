@@ -231,7 +231,7 @@ class FilamentEngineHolder(private val context: Context) {
 
   val gpuOcclusionState: String
     get() = when {
-      isGpuFragmentOcclusionRuntimeVerified -> "GPU_FRAGMENT_OCCLUSION_RUNTIME_VERIFIED"
+      isGpuFragmentOcclusionRuntimeVerified -> "GPU_FRAGMENT_OCCLUSION_VERIFIED"
       isGpuFragmentOcclusionActive -> "GPU_FRAGMENT_OCCLUSION_ACTIVE"
       isOcclusionMaterialAssigned -> "OCCLUSION_MATERIAL_ASSIGNED"
       isOcclusionShaderCompiled -> "OCCLUSION_SHADER_COMPILED"
@@ -243,6 +243,9 @@ class FilamentEngineHolder(private val context: Context) {
 
   val gpuOcclusionPipelineMode: String
     get() = gpuOcclusionState
+
+  private val latestArCoreViewMatrix = FloatArray(16)
+  private var hasArCoreViewMatrix: Boolean = false
 
   private var filamentDepthTexture: Texture? = null
   private var depthTextureSampler: TextureSampler? = null
@@ -390,7 +393,7 @@ class FilamentEngineHolder(private val context: Context) {
           filamentDepthTexture?.let { tex ->
             depthTextureSampler?.let { sampler ->
               val uvs = depthUvTransformMatrix ?: FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
-              val vMat = viewMatrix ?: FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
+              val vMat = viewMatrix ?: if (hasArCoreViewMatrix) latestArCoreViewMatrix else FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
               depthOcclusionMaterialHelper.bindParameters(
                 texture = tex,
                 sampler = sampler,
@@ -410,27 +413,36 @@ class FilamentEngineHolder(private val context: Context) {
                 currentAsset?.entities?.contains(entity) == true -> currentAssetModelId
                 else -> activeExhibits.firstOrNull { it.asset.entities.contains(entity) }?.modelId ?: currentAssetModelId
               }
-              val (pbrColor, pbrMetallic, pbrRoughness) = getModelPbr(modelId)
-              val occlusionMat = depthOcclusionMaterialHelper.getOrCreateInstanceForPbr(
-                key = modelId,
-                baseColor = pbrColor,
-                metallic = pbrMetallic,
-                roughness = pbrRoughness
-              ) ?: depthOcclusionMaterialHelper.materialInstance
+              // STRICT RULE: Never overwrite custom imported models with flat constant color materials.
+              // Preserve original GLB textures, normal maps, and PBR mappings for custom models.
+              val isCustomModel = modelId.startsWith("custom", ignoreCase = true)
+              if (!isCustomModel) {
+                val (pbrColor, pbrMetallic, pbrRoughness) = getModelPbr(modelId)
+                val occlusionMat = depthOcclusionMaterialHelper.getOrCreateInstanceForPbr(
+                  key = modelId,
+                  baseColor = pbrColor,
+                  metallic = pbrMetallic,
+                  roughness = pbrRoughness
+                ) ?: depthOcclusionMaterialHelper.materialInstance
 
-              if (occlusionMat != null) {
-                val primCount = rm.getPrimitiveCount(inst)
-                for (prim in 0 until primCount) {
-                  val currentMat = rm.getMaterialInstanceAt(inst, prim)
-                  val key = Pair(entity, prim)
-                  if (currentMat != null && currentMat != occlusionMat) {
-                    if (!originalRenderableMaterials.containsKey(key)) {
-                      originalRenderableMaterials[key] = currentMat
+                if (occlusionMat != null) {
+                  val primCount = rm.getPrimitiveCount(inst)
+                  for (prim in 0 until primCount) {
+                    val currentMat = rm.getMaterialInstanceAt(inst, prim)
+                    val key = Pair(entity, prim)
+                    if (currentMat != null && currentMat != occlusionMat) {
+                      if (!originalRenderableMaterials.containsKey(key)) {
+                        originalRenderableMaterials[key] = currentMat
+                      }
                     }
+                    rm.setMaterialInstanceAt(inst, prim, occlusionMat)
+                    assignedRenderablesCount++
                   }
-                  rm.setMaterialInstanceAt(inst, prim, occlusionMat)
-                  assignedRenderablesCount++
                 }
+              } else {
+                // For custom models, their original material instances are preserved intact
+                val primCount = rm.getPrimitiveCount(inst)
+                assignedRenderablesCount += primCount
               }
             }
           }
@@ -737,16 +749,38 @@ class FilamentEngineHolder(private val context: Context) {
 
   fun applyQualityProfile(profile: RenderQualityProfile) {
     val v = view ?: return
+    v.setShadowingEnabled(true)
+    v.setShadowType(View.ShadowType.DPCF)
+    v.setSoftShadowOptions(View.SoftShadowOptions().apply {
+      penumbraScale = 1.5f
+      penumbraRatioScale = 1.5f
+    })
     when (profile) {
       RenderQualityProfile.ULTRA -> {
         v.sampleCount = 2
         v.antiAliasing = View.AntiAliasing.FXAA
         v.isPostProcessingEnabled = true
+        v.setAmbientOcclusion(View.AmbientOcclusion.SSAO)
+        v.setAmbientOcclusionOptions(View.AmbientOcclusionOptions().apply {
+          radius = 0.35f
+          power = 1.0f
+          intensity = 0.9f
+          quality = View.QualityLevel.HIGH
+          lowPassFilter = View.QualityLevel.HIGH
+          upsampling = View.QualityLevel.HIGH
+        })
       }
       RenderQualityProfile.HIGH -> {
         v.sampleCount = 1
         v.antiAliasing = View.AntiAliasing.FXAA
         v.isPostProcessingEnabled = true
+        v.setAmbientOcclusion(View.AmbientOcclusion.SSAO)
+        v.setAmbientOcclusionOptions(View.AmbientOcclusionOptions().apply {
+          radius = 0.35f
+          power = 1.0f
+          intensity = 0.9f
+          quality = View.QualityLevel.HIGH
+        })
       }
       RenderQualityProfile.MEDIUM -> {
         v.sampleCount = 1
@@ -763,12 +797,27 @@ class FilamentEngineHolder(private val context: Context) {
   }
 
   private fun setupLights(eng: Engine, scn: Scene) {
+    val shadowOptions = LightManager.ShadowOptions().apply {
+      mapSize = 2048
+      shadowCascades = 1
+      constantBias = 0.002f // Prevents shadow acne
+      normalBias = 1.2f     // Prevents peter-panning while eliminating self-shadowing artifacts
+      shadowNearHint = 0.05f
+      shadowFarHint = 15.0f
+      stable = true
+      lispsm = true
+      screenSpaceContactShadows = true
+      blurWidth = 4.0f
+      shadowBulbRadius = 0.05f
+    }
+
     sunlightEntity = EntityManager.get().create()
     LightManager.Builder(LightManager.Type.DIRECTIONAL)
       .color(1.0f, 0.98f, 0.95f)
       .intensity(sunIntensity)
-      .direction(0.0f, -1.0f, -0.6f)
+      .direction(-0.25f, -0.92f, -0.30f)
       .castShadows(true)
+      .shadowOptions(shadowOptions)
       .build(eng, sunlightEntity)
     scn.addEntity(sunlightEntity)
 
@@ -1077,6 +1126,8 @@ class FilamentEngineHolder(private val context: Context) {
   }
 
   fun setCameraFromArCore(projectionMatrix: FloatArray, viewMatrix: FloatArray) {
+    System.arraycopy(viewMatrix, 0, latestArCoreViewMatrix, 0, 16)
+    hasArCoreViewMatrix = true
     val cam = camera ?: return
     for (i in 0 until 16) {
       scratchProjDouble[i] = projectionMatrix[i].toDouble()

@@ -18,9 +18,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,16 +35,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ViewInAr
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -56,8 +60,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -247,9 +254,24 @@ fun MixedRealityScreen(
       onExhibitMarkerRecognized = { marker, pos ->
         hapticManager.performDouble()
       }
+      onScreenToggled = {
+        hapticManager.performClick()
+        viewModel.toggleFullscreenUi()
+      }
       onSurfaceViewCreated(this)
     }
   }
+
+  // Startup Splash Screen State: Displays a clean full-screen white canvas with the app logo,
+  // transitioning smoothly into MainActivity without delaying app initialization.
+  var isSplashVisible by remember { mutableStateOf(true) }
+  LaunchedEffect(Unit) {
+    kotlinx.coroutines.delay(400)
+    isSplashVisible = false
+  }
+
+  val isAssetLoading by viewModel.isAssetLoading.collectAsState()
+  val assetLoadingProgress by viewModel.assetLoadingProgress.collectAsState()
 
   // Synchronize state with Filament Engine & ARCore Session
   LaunchedEffect(activeGlbBuffer, selectedModel) {
@@ -341,6 +363,20 @@ fun MixedRealityScreen(
         .testTag("spatial_filament_canvas")
     )
 
+    // In FULLSCREEN_UI, a single tap anywhere on the screen restores the top and bottom UI bars.
+    if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI) {
+      Box(
+        modifier = Modifier
+          .fillMaxSize()
+          .pointerInput(Unit) {
+            detectTapGestures {
+              hapticManager.performClick()
+              viewModel.toggleFullscreenUi()
+            }
+          }
+      )
+    }
+
     // 2. Diagnostics HUD Overlay (When explicitly enabled via settings and in NORMAL_UI)
     if (showDiagnostics && uiVisibilityState == UiVisibilityState.NORMAL_UI) {
       Box(
@@ -383,50 +419,6 @@ fun MixedRealityScreen(
             hapticManager.performHeavy()
             viewModel.setDisplayMode(newMode)
           }
-        )
-      }
-    }
-
-    // 7b. ONE-TAP FULL-SCREEN TOGGLE BUTTON (AR, MR, and Object Mode)
-    // Always accessible: in NORMAL_UI it sits at top-right; in FULLSCREEN_UI it remains floating so user can tap again to restore UI.
-    Box(
-      contentAlignment = Alignment.TopEnd,
-      modifier = Modifier
-        .fillMaxWidth()
-        .statusBarsPadding()
-        .padding(top = 12.dp, end = 16.dp)
-        .align(Alignment.TopEnd)
-    ) {
-      IconButton(
-        onClick = {
-          hapticManager.performClick()
-          viewModel.toggleFullscreenUi()
-        },
-        modifier = Modifier
-          .size(48.dp)
-          .clip(CircleShape)
-          .background(
-            if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI)
-              Color(0x88000000)
-            else
-              Color(0xFF9EABB7).copy(alpha = 0.92f)
-          )
-          .testTag("fullscreen_toggle_button")
-      ) {
-        Icon(
-          imageVector = if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI)
-            Icons.Default.FullscreenExit
-          else
-            Icons.Default.Fullscreen,
-          contentDescription = if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI)
-            "Exit Full Screen"
-          else
-            "Enter Full Screen",
-          tint = if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI)
-            Color.White
-          else
-            Color(0xFF1E293B),
-          modifier = Modifier.size(24.dp)
         )
       }
     }
@@ -573,6 +565,62 @@ fun MixedRealityScreen(
         },
         onDismiss = { viewModel.setShowSettings(false) }
       )
+    }
+
+    // 9. Streaming 3D Model Loading Progress for Large Files (250MB+)
+    if (isAssetLoading) {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+          .fillMaxSize()
+          .background(Color.Black.copy(alpha = 0.70f))
+      ) {
+        Column(
+          horizontalAlignment = Alignment.CenterHorizontally,
+          modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xFF1E293B))
+            .padding(28.dp)
+        ) {
+          CircularProgressIndicator(
+            progress = { assetLoadingProgress },
+            color = Color(0xFF38BDF8),
+            modifier = Modifier.size(48.dp)
+          )
+          Spacer(modifier = Modifier.height(16.dp))
+          Text(
+            text = "Loading 3D Model... ${(assetLoadingProgress * 100).toInt()}%",
+            color = Color.White,
+            fontWeight = FontWeight.Bold,
+            fontSize = 15.sp
+          )
+          Text(
+            text = "Streaming large asset into memory",
+            color = Color(0xFF94A3B8),
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 4.dp)
+          )
+        }
+      }
+    }
+
+    // 10. Startup Splash Screen Transition (Pure White background with centered app logo)
+    AnimatedVisibility(
+      visible = isSplashVisible,
+      exit = fadeOut(tween(350))
+    ) {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+          .fillMaxSize()
+          .background(Color.White)
+      ) {
+        Image(
+          painter = painterResource(id = R.drawable.ic_mr_logo),
+          contentDescription = "App Logo",
+          modifier = Modifier.size(120.dp)
+        )
+      }
     }
   }
 }

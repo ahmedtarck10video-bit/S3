@@ -114,6 +114,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
   var onTelemetryUpdate: ((fps: Float, drawCalls: Int, vertexCount: Int, trackingData: ArCoreTrackingData) -> Unit)? = null
   var onAnchorPlaced: ((Anchor, FloatArray, ExhibitSource, String, String) -> Unit)? = null
   var onExhibitMarkerRecognized: ((ExhibitMarker, FloatArray) -> Unit)? = null
+  var onScreenToggled: (() -> Unit)? = null
 
   // Latest AR tracking data
   private var latestTrackingData = ArCoreTrackingData()
@@ -650,7 +651,19 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   private fun handleTap(xPx: Float, yPx: Float) {
+    if (displayMode == DisplayMode.OBJECT) {
+      onScreenToggled?.invoke()
+      return
+    }
+
     if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
+      // If model is already pinned/anchored in the scene, screen tap toggles the UI bars cleanly
+      // without interrupting ARCore tracking, restarting sessions, or recreating anchors.
+      if (activeArAnchors.isNotEmpty()) {
+        onScreenToggled?.invoke()
+        return
+      }
+
       try {
         val mappedX = if (displayMode == DisplayMode.MR && width > 0) {
           val halfWidth = width / 2f
@@ -658,9 +671,13 @@ class SpatialSurfaceView @JvmOverloads constructor(
         } else {
           xPx
         }
-        val frame = arCoreSessionManager.latestFrame ?: return
+        val frame = arCoreSessionManager.latestFrame ?: run {
+          onScreenToggled?.invoke()
+          return
+        }
         if (frame.camera.trackingState != TrackingState.TRACKING) {
           DiagnosticsLogger.log(TAG, "Placement deferred: Camera tracking not yet stable (${frame.camera.trackingState})")
+          onScreenToggled?.invoke()
           return
         }
         val hit = arCoreSessionManager.hitTest(frame, mappedX, yPx)
@@ -707,10 +724,15 @@ class SpatialSurfaceView @JvmOverloads constructor(
             onAnchorPlaced?.invoke(anchor, posArr, ExhibitSource.PLANE_TAP, currentSelectedModelId, currentSelectedModelTitle)
             Log.i(TAG, "ARCore Anchor pinned on plane at: $hx, $hy, $hz")
             DiagnosticsLogger.log(TAG, "Placed Anchor at ($hx, $hy, $hz)")
+          } else {
+            onScreenToggled?.invoke()
           }
+        } else {
+          onScreenToggled?.invoke()
         }
       } catch (e: Exception) {
         Log.w(TAG, "Error during AR tap hit test: ${e.message}")
+        onScreenToggled?.invoke()
       }
     }
   }

@@ -108,6 +108,12 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   private val _sunIntensity = MutableStateFlow(100000.0f)
   val sunIntensity: StateFlow<Float> = _sunIntensity.asStateFlow()
 
+  private val _isAssetLoading = MutableStateFlow(false)
+  val isAssetLoading: StateFlow<Boolean> = _isAssetLoading.asStateFlow()
+
+  private val _assetLoadingProgress = MutableStateFlow(0f)
+  val assetLoadingProgress: StateFlow<Float> = _assetLoadingProgress.asStateFlow()
+
   private val _ipdMm = MutableStateFlow(64.0f)
   val ipdMm: StateFlow<Float> = _ipdMm.asStateFlow()
 
@@ -157,8 +163,16 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
 
   fun loadCustomGlbFromUri(uri: Uri, context: Context) {
     viewModelScope.launch {
+      _isAssetLoading.value = true
+      _assetLoadingProgress.value = 0f
       try {
-        val directBuffer = GltfAssetFactory.readUriToDirectByteBuffer(context, uri)
+        val directBuffer = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+          GltfAssetFactory.readUriToDirectByteBuffer(context, uri) { read, total ->
+            if (total > 0) {
+              _assetLoadingProgress.value = (read.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+            }
+          }
+        }
         if (directBuffer != null) {
           val modelName = uri.lastPathSegment?.substringAfterLast('/') ?: "Custom_Model.glb"
           val customModel = SpatialModel(
@@ -175,14 +189,17 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
           _modelsList.update { listOf(customModel) + it }
           _selectedModel.value = customModel
           _activeGlbBuffer.value = directBuffer
-          emitToast("Imported GLB: $modelName")
-          log("GLTFIO", "Parsed external glTF: $modelName (${directBuffer.capacity() / 1024} KB)")
+          emitToast("Imported 3D Model: $modelName")
+          log("GLTFIO", "Parsed external glTF: $modelName (${directBuffer.capacity() / (1024 * 1024)} MB)")
         } else {
-          emitToast("Could not read GLB / glTF file.")
+          emitToast("Could not read GLB / glTF file or file was invalid.")
         }
       } catch (e: Exception) {
         emitToast("Error loading glTF file: ${e.message}")
         log("ERROR", "Failed to load glTF: ${e.message}")
+      } finally {
+        _isAssetLoading.value = false
+        _assetLoadingProgress.value = 1f
       }
     }
   }

@@ -2,8 +2,12 @@ package com.example.parser
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import com.example.model.SpatialModel
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -15,26 +19,128 @@ import kotlin.math.sin
  * Factory and loader for binary GLB and glTF 2.0 models for Filament gltfio engine.
  * Generates valid GLB containers (Header + JSON Chunk + BIN Chunk) with PBR materials,
  * vertex buffers, normal buffers, and index buffers.
+ * Supports streaming direct memory loading for large 3D models up to and beyond 250 MB.
  */
 object GltfAssetFactory {
 
+  private const val TAG = "GltfAssetFactory"
+  const val GLB_MAGIC = 0x46546C67 // "glTF" in ASCII little-endian
+  const val MAX_SUPPORTED_FILE_SIZE_BYTES = 500L * 1024L * 1024L // 500 MB capacity ceiling
+
   /**
-   * Reads raw bytes from an input stream / URI into a direct ByteBuffer for Filament.
+   * Validates whether a direct ByteBuffer begins with the standard 12-byte binary glTF (GLB) header.
    */
-  fun readToDirectByteBuffer(inputStream: InputStream): ByteBuffer {
-    val bytes = inputStream.readBytes()
-    val buffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.LITTLE_ENDIAN)
-    buffer.put(bytes)
-    buffer.rewind()
-    return buffer
+  fun validateGlbHeader(buffer: ByteBuffer): Boolean {
+    if (buffer.capacity() < 12) return false
+    val pos = buffer.position()
+    buffer.order(ByteOrder.LITTLE_ENDIAN)
+    val magic = buffer.getInt(0)
+    val version = buffer.getInt(4)
+    val length = buffer.getInt(8)
+    buffer.position(pos)
+    val isValid = magic == GLB_MAGIC && version in 1..2 && length <= buffer.capacity() && length > 12
+    if (!isValid) {
+      Log.w(TAG, "Invalid GLB header: magic=0x%08X (expected 0x%08X), version=$version, length=$length, capacity=${buffer.capacity()}".format(magic, GLB_MAGIC))
+    }
+    return isValid
   }
 
-  fun readUriToDirectByteBuffer(context: Context, uri: Uri): ByteBuffer? {
+  /**
+   * Reads raw bytes from an input stream into a direct ByteBuffer for Filament.
+   * Employs chunked buffered streaming (256 KB) without calling readBytes(),
+   * preventing duplicate full-file memory allocations.
+   */
+  fun readToDirectByteBuffer(
+    inputStream: InputStream,
+    onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
+  ): ByteBuffer {
+    val tempFile = File.createTempFile("stream_glb_", ".bin")
+    try {
+      FileOutputStream(tempFile).use { out ->
+        val buffer = ByteArray(256 * 1024)
+        var read: Int
+        var total = 0L
+        while (inputStream.read(buffer).also { read = it } != -1) {
+          out.write(buffer, 0, read)
+          total += read
+          onProgress?.invoke(total, total)
+        }
+        out.flush()
+      }
+
+      val fileSize = tempFile.length()
+      if (fileSize > MAX_SUPPORTED_FILE_SIZE_BYTES) {
+        throw IllegalArgumentException("Asset size ($fileSize bytes) exceeds maximum supported 500 MB.")
+      }
+
+      val directBuffer = ByteBuffer.allocateDirect(fileSize.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+      FileInputStream(tempFile).use { inStream ->
+        val channel = inStream.channel
+        channel.read(directBuffer)
+      }
+      directBuffer.rewind()
+      return directBuffer
+    } finally {
+      tempFile.delete()
+    }
+  }
+
+  /**
+   * Reads a model from a content Uri directly into an off-heap direct ByteBuffer.
+   * Handles files up to at least 250 MB without OutOfMemoryError by querying file size directly
+   * from the ParcelFileDescriptor and streaming in 256 KB native chunks with zero heap duplication.
+   */
+  fun readUriToDirectByteBuffer(
+    context: Context,
+    uri: Uri,
+    onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
+  ): ByteBuffer? {
     return try {
-      context.contentResolver.openInputStream(uri)?.use { stream ->
-        readToDirectByteBuffer(stream)
+      val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+      if (pfd != null) {
+        pfd.use { descriptor ->
+          val statSize = descriptor.statSize
+          if (statSize > 0) {
+            if (statSize > MAX_SUPPORTED_FILE_SIZE_BYTES) {
+              Log.e(TAG, "File size ($statSize bytes) exceeds maximum supported 500 MB.")
+              return null
+            }
+            // Allocate directly in off-heap native memory for Filament gltfio
+            val directBuffer = ByteBuffer.allocateDirect(statSize.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+            FileInputStream(descriptor.fileDescriptor).use { inStream ->
+              val channel = inStream.channel
+              var totalRead = 0L
+              while (totalRead < statSize) {
+                val bytesRead = channel.read(directBuffer)
+                if (bytesRead <= 0) break
+                totalRead += bytesRead
+                onProgress?.invoke(totalRead, statSize)
+              }
+            }
+            directBuffer.rewind()
+            if (validateGlbHeader(directBuffer)) {
+              Log.i(TAG, "Successfully streamed ${statSize / (1024 * 1024)} MB GLB asset into direct ByteBuffer.")
+              directBuffer
+            } else {
+              Log.w(TAG, "Header validation rejected corrupt/invalid GLB container.")
+              null
+            }
+          } else {
+            // Fallback for providers that do not report statSize
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+              val buf = readToDirectByteBuffer(stream, onProgress)
+              if (validateGlbHeader(buf)) buf else null
+            }
+          }
+        }
+      } else {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+          val buf = readToDirectByteBuffer(stream, onProgress)
+          if (validateGlbHeader(buf)) buf else null
+        }
       }
     } catch (e: Exception) {
+      Log.e(TAG, "Error loading large GLB asset: ${e.message}", e)
       null
     }
   }
