@@ -70,10 +70,31 @@ class TwoFingerRotateDetector(
         val actionIndex = event.actionIndex
         val releasedPointerId = event.getPointerId(actionIndex)
         if (releasedPointerId == pointerId1 || releasedPointerId == pointerId2) {
-          isRotating = false
-          isActivelyTwisting = false
-          pointerId1 = MotionEvent.INVALID_POINTER_ID
-          pointerId2 = MotionEvent.INVALID_POINTER_ID
+          val remainingCount = event.pointerCount - 1
+          if (remainingCount >= 2) {
+            var newId1 = MotionEvent.INVALID_POINTER_ID
+            var newId2 = MotionEvent.INVALID_POINTER_ID
+            for (i in 0 until event.pointerCount) {
+              if (i != actionIndex) {
+                if (newId1 == MotionEvent.INVALID_POINTER_ID) {
+                  newId1 = event.getPointerId(i)
+                } else if (newId2 == MotionEvent.INVALID_POINTER_ID) {
+                  newId2 = event.getPointerId(i)
+                  break
+                }
+              }
+            }
+            pointerId1 = newId1
+            pointerId2 = newId2
+            initialAngle = calculateAngle(event, pointerId1, pointerId2)
+            isRotating = true
+            isActivelyTwisting = false
+          } else {
+            isRotating = false
+            isActivelyTwisting = false
+            pointerId1 = MotionEvent.INVALID_POINTER_ID
+            pointerId2 = MotionEvent.INVALID_POINTER_ID
+          }
         }
       }
 

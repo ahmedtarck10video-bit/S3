@@ -912,8 +912,8 @@ class FilamentEngineHolder(private val context: Context) {
     val rootInst = tm.getInstance(asset.root)
     if (rootInst != 0) {
       Matrix.setIdentityM(scratchModelMatrix, 0)
-      // Elevate slightly (+0.08m) so it is centered and fully visible above bottom controls
-      Matrix.translateM(scratchModelMatrix, 0, 0f, 0.08f, 0f)
+      // Elevate slightly (+0.08m) and apply user gesture modelOffsetX, modelOffsetY, modelOffsetZ
+      Matrix.translateM(scratchModelMatrix, 0, modelOffsetX, 0.08f + modelOffsetY, modelOffsetZ)
       if (modelRotationDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
       }
@@ -929,9 +929,9 @@ class FilamentEngineHolder(private val context: Context) {
       Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
 
-      val groundY = 0.08f - (modelPhysicalHalfHeight * effectiveScale)
+      val groundY = 0.08f + modelOffsetY - (modelPhysicalHalfHeight * effectiveScale)
       val radius = maxOf(modelPhysicalWidthMeters, modelPhysicalDepthMeters, 0.5f) * effectiveScale * 1.8f
-      updateShadowReceiverPlane(0f, groundY, 0f, radius)
+      updateShadowReceiverPlane(modelOffsetX, groundY, modelOffsetZ, radius)
     }
   }
 

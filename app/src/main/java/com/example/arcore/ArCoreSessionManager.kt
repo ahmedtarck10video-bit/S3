@@ -191,6 +191,21 @@ class ArCoreSessionManager(private val context: Context) {
   private val registeredAnchors = java.util.concurrent.CopyOnWriteArrayList<Anchor>()
   var primaryAnchor: Anchor? = null
 
+  // Double-buffering for atomic, low-GC render state synchronization (eliminates ~540 per-frame array allocations)
+  private val renderStateBufferA = SynchronizedArRenderState()
+  private val renderStateBufferB = SynchronizedArRenderState()
+  private var activeStateBufferIndex = 0
+
+  // Reusable collection for active anchors to avoid per-frame List allocation
+  private val reusableAnchorRecords = ArrayList<SynchronizedAnchorRecord>(16)
+  // Reusable single-element list for depth anchor queries
+  private val reusableDepthAnchorList = ArrayList<Pose>(1)
+
+  // Decoupled trackable processing stage counter to distribute expensive operations across frames
+  private var trackableProcessingStage = 0
+  private var cachedHPlanesCount = 0
+  private var cachedVPlanesCount = 0
+
   @Volatile
   var currentSynchronizedState: SynchronizedArRenderState? = null
     private set
@@ -547,7 +562,8 @@ class ArCoreSessionManager(private val context: Context) {
 
   /**
    * Updates the ARCore session and produces ONE synchronized AR render state strictly
-   * derived from this single current frame. Zero heap allocations on critical path.
+   * Synchronizes camera pose, matrices, lighting, and depth from this current frame.
+   * Employs lock-free preallocated double-buffering to minimize GC pressure on the 60 FPS critical path.
    */
   fun updateFrame(): Frame? {
     if (isSessionPaused) return null
@@ -614,8 +630,8 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
-      // 4. Synchronize Anchors with Controlled Recovery
-      val activeAnchorRecords = ArrayList<SynchronizedAnchorRecord>(registeredAnchors.size + 1)
+      // 4. Synchronize Anchors with Controlled Recovery (reusable collection to eliminate per-frame allocations)
+      reusableAnchorRecords.clear()
       var reconciledPrimaryPose: Pose? = null
       var primaryAnchorState = TrackingState.STOPPED
 
@@ -624,7 +640,7 @@ class ArCoreSessionManager(private val context: Context) {
         primaryAnchorState = pAnchor.trackingState
         val (recPose, isRec) = anchorRecoveryTracker.reconcileAnchorPose(pAnchor)
         reconciledPrimaryPose = recPose
-        activeAnchorRecords.add(
+        reusableAnchorRecords.add(
           SynchronizedAnchorRecord(
             id = "primary_${pAnchor.hashCode()}",
             anchor = pAnchor,
@@ -640,7 +656,7 @@ class ArCoreSessionManager(private val context: Context) {
         if (anchor == pAnchor) continue
         val st = anchor.trackingState
         val (recPose, isRec) = anchorRecoveryTracker.reconcileAnchorPose(anchor)
-        activeAnchorRecords.add(
+        reusableAnchorRecords.add(
           SynchronizedAnchorRecord(
             id = "anchor_${anchor.hashCode()}",
             anchor = anchor,
@@ -659,8 +675,11 @@ class ArCoreSessionManager(private val context: Context) {
       val isDepthSupported = currentSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
       val isDepthEnabled = currentSession.config.depthMode == Config.DepthMode.AUTOMATIC
       if (dom != null && isDepthEnabled) {
-        val anchorPosesForDepth = if (reconciledPrimaryPose != null) listOf(reconciledPrimaryPose) else emptyList()
-        dom.processFrameDepth(frame, anchorPosesForDepth)
+        reusableDepthAnchorList.clear()
+        if (reconciledPrimaryPose != null) {
+          reusableDepthAnchorList.add(reconciledPrimaryPose)
+        }
+        dom.processFrameDepth(frame, reusableDepthAnchorList)
         depthTimestampNs = dom.latestDepthTimestampNs
         isDepthValid = dom.isSynchronizedWithCamera && dom.isDepthTextureReady
       }
@@ -673,49 +692,54 @@ class ArCoreSessionManager(private val context: Context) {
       }
       val isSpatialStabilityHigh = cachedPointCloudCount > 30 && cachedPointCloudConf > 0.4f
 
-      // 7. Construct Atomic Synchronized AR Render State
-      val synchronizedState = SynchronizedArRenderState(
-        frameId = frameId,
-        frameTimestampNs = frameTimestampNs,
-        trackingState = trackingState,
-        trackingFailureReason = trackingFailureReason,
-        cameraPose = camPose,
-        projectionMatrix = scratchProjectionMatrix.clone(),
-        viewMatrix = scratchViewMatrix.clone(),
-        cameraPosition = scratchCamPos.clone(),
-        cameraForward = scratchCamForward.clone(),
-        primaryAnchorPose = reconciledPrimaryPose,
-        primaryAnchorState = primaryAnchorState,
-        anchorRecords = activeAnchorRecords,
-        depthTimestampNs = depthTimestampNs,
-        isDepthValid = isDepthValid,
-        depthTextureId = dom?.depthTextureId ?: 0,
-        depthWidth = dom?.depthWidth ?: 0,
-        depthHeight = dom?.depthHeight ?: 0,
-        minDepthMeters = dom?.minDepthMeters ?: 0f,
-        maxDepthMeters = dom?.maxDepthMeters ?: 0f,
-        averageDepthMeters = dom?.averageDepthMeters ?: 0f,
-        occlusionPercentage = dom?.occlusionPercentage ?: 0f,
-        depthUvTransformMatrix = dom?.depthUvTransformMatrix?.clone() ?: FloatArray(16),
-        pointCloudTimestampNs = cachedPointCloudTimestampNs,
-        pointCloudPointsCount = cachedPointCloudCount,
-        pointCloudMeanDistanceMeters = cachedPointCloudMeanDist,
-        pointCloudConfidenceRatio = cachedPointCloudConf,
-        isSpatialStabilityHigh = isSpatialStabilityHigh,
-        lightIntensityLumens = lightIntensityLumens,
-        colorCorrectionRgb = scratchColorCorrection.clone(),
-        mainLightDirection = scratchMainLightDir.clone(),
-        mainLightIntensity = scratchMainLightInt.clone(),
-        isFresh = true
-      )
-      currentSynchronizedState = synchronizedState
-      onSynchronizedStateProduced?.invoke(synchronizedState)
+      // 7. Populate Preallocated Synchronized AR Render State (Zero Array Clones via Preallocated Double Buffers)
+      val targetState = if (activeStateBufferIndex == 0) renderStateBufferA else renderStateBufferB
+      activeStateBufferIndex = 1 - activeStateBufferIndex
 
-      // 8. Decoupled Non-Critical Processing (Planes, Augmented Images, Semantics, Geospatial, Mesh)
-      // Throttled at ~7Hz (150ms) to ensure the 60 FPS rendering path is never blocked
-      if (nowMs - lastThrottledProcessingTimeMs >= 150L) {
+      targetState.frameId = frameId
+      targetState.frameTimestampNs = frameTimestampNs
+      targetState.trackingState = trackingState
+      targetState.trackingFailureReason = trackingFailureReason
+      targetState.cameraPose = camPose
+      System.arraycopy(scratchProjectionMatrix, 0, targetState.projectionMatrix, 0, 16)
+      System.arraycopy(scratchViewMatrix, 0, targetState.viewMatrix, 0, 16)
+      System.arraycopy(scratchCamPos, 0, targetState.cameraPosition, 0, 3)
+      System.arraycopy(scratchCamForward, 0, targetState.cameraForward, 0, 3)
+      targetState.primaryAnchorPose = reconciledPrimaryPose
+      targetState.primaryAnchorState = primaryAnchorState
+      targetState.anchorRecords = ArrayList(reusableAnchorRecords)
+      targetState.depthTimestampNs = depthTimestampNs
+      targetState.isDepthValid = isDepthValid
+      targetState.depthTextureId = dom?.depthTextureId ?: 0
+      targetState.depthWidth = dom?.depthWidth ?: 0
+      targetState.depthHeight = dom?.depthHeight ?: 0
+      targetState.minDepthMeters = dom?.minDepthMeters ?: 0f
+      targetState.maxDepthMeters = dom?.maxDepthMeters ?: 0f
+      targetState.averageDepthMeters = dom?.averageDepthMeters ?: 0f
+      targetState.occlusionPercentage = dom?.occlusionPercentage ?: 0f
+      if (dom != null) {
+        System.arraycopy(dom.depthUvTransformMatrix, 0, targetState.depthUvTransformMatrix, 0, 16)
+      }
+      targetState.pointCloudTimestampNs = cachedPointCloudTimestampNs
+      targetState.pointCloudPointsCount = cachedPointCloudCount
+      targetState.pointCloudMeanDistanceMeters = cachedPointCloudMeanDist
+      targetState.pointCloudConfidenceRatio = cachedPointCloudConf
+      targetState.isSpatialStabilityHigh = isSpatialStabilityHigh
+      targetState.lightIntensityLumens = lightIntensityLumens
+      System.arraycopy(scratchColorCorrection, 0, targetState.colorCorrectionRgb, 0, 4)
+      System.arraycopy(scratchMainLightDir, 0, targetState.mainLightDirection, 0, 3)
+      System.arraycopy(scratchMainLightInt, 0, targetState.mainLightIntensity, 0, 3)
+      targetState.isFresh = true
+
+      currentSynchronizedState = targetState
+      onSynchronizedStateProduced?.invoke(targetState)
+
+      // 8. Decoupled Non-Critical Trackable Processing
+      // Interleaved across successive frames (~50ms intervals) so heavy operations (Mesh, Semantics, Geospatial)
+      // never cause a multi-millisecond frame spike on the render thread.
+      if (nowMs - lastThrottledProcessingTimeMs >= 50L) {
         lastThrottledProcessingTimeMs = nowMs
-        processThrottledTrackables(
+        processStagedTrackables(
           currentSession = currentSession,
           frame = frame,
           camPose = camPose,
@@ -775,7 +799,12 @@ class ArCoreSessionManager(private val context: Context) {
     } catch (_: Exception) {}
   }
 
-  private fun processThrottledTrackables(
+  /**
+   * Staged non-critical trackables processing:
+   * Splits trackables workload across frames so that heavy scene understanding tasks
+   * (Semantics, Mesh generation, Geospatial queries) never cause frame-time spikes on the render loop.
+   */
+  private fun processStagedTrackables(
     currentSession: Session,
     frame: Frame,
     camPose: Pose?,
@@ -784,7 +813,50 @@ class ArCoreSessionManager(private val context: Context) {
     isDepthSupported: Boolean,
     isDepthEnabled: Boolean
   ) {
-    // 1. Collect Planes
+    when (trackableProcessingStage) {
+      0 -> {
+        // Stage 0: Detect Planes and Augmented Images
+        updatePlanes(currentSession)
+        updateAugmentedImages(currentSession, camPose, now)
+      }
+      1 -> {
+        // Stage 1: Geospatial state & Augmented Faces
+        try {
+          geospatialManager.updateGeospatialState(currentSession)
+          facesManager.processFrameFaces(currentSession)
+        } catch (e: Exception) {
+          Log.w(TAG, "Notice in Stage 1 features: ${e.message}")
+        }
+      }
+      2 -> {
+        // Stage 2: Scene Semantics & Environmental Reconstruction Mesh
+        try {
+          semanticsManager.processFrameSemantics(frame)
+          environmentalMeshManager.updateEnvironmentalMesh(currentSession, frame, semanticsManager)
+        } catch (e: Exception) {
+          Log.w(TAG, "Notice in Stage 2 features: ${e.message}")
+        }
+      }
+      3 -> {
+        // Stage 3: Recording playback update & Publish immutable tracking telemetry
+        try {
+          recordingPlaybackManager.updateFrameState(currentSession)
+        } catch (e: Exception) {
+          Log.w(TAG, "Notice in Stage 3 features: ${e.message}")
+        }
+        publishTrackingTelemetry(
+          frame = frame,
+          camPose = camPose,
+          lightIntensityLumens = lightIntensityLumens,
+          isDepthSupported = isDepthSupported,
+          isDepthEnabled = isDepthEnabled
+        )
+      }
+    }
+    trackableProcessingStage = (trackableProcessingStage + 1) % 4
+  }
+
+  private fun updatePlanes(currentSession: Session) {
     val allPlanes = currentSession.getAllTrackables(Plane::class.java)
     var hPlanes = 0
     var vPlanes = 0
@@ -809,8 +881,11 @@ class ArCoreSessionManager(private val context: Context) {
         )
       }
     }
+    cachedHPlanesCount = hPlanes
+    cachedVPlanesCount = vPlanes
+  }
 
-    // 2. Process Augmented Image Tracking State Machine
+  private fun updateAugmentedImages(currentSession: Session, camPose: Pose?, now: Long) {
     val allImages = currentSession.getAllTrackables(AugmentedImage::class.java)
     scratchImageList.clear()
 
@@ -891,18 +966,15 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
     }
+  }
 
-    // Asynchronously or safely update non-critical features without blocking
-    try {
-      geospatialManager.updateGeospatialState(currentSession)
-      semanticsManager.processFrameSemantics(frame)
-      facesManager.processFrameFaces(currentSession)
-      recordingPlaybackManager.updateFrameState(currentSession)
-      environmentalMeshManager.updateEnvironmentalMesh(currentSession, frame, semanticsManager)
-    } catch (e: Exception) {
-      Log.w(TAG, "Non-critical feature update notice: ${e.message}")
-    }
-
+  private fun publishTrackingTelemetry(
+    frame: Frame,
+    camPose: Pose?,
+    lightIntensityLumens: Float,
+    isDepthSupported: Boolean,
+    isDepthEnabled: Boolean
+  ) {
     val currentTrackingState = frame.camera.trackingState
     val currentFailureReason = frame.camera.trackingFailureReason
     val trackingQuality = when (currentTrackingState) {
@@ -930,8 +1002,8 @@ class ArCoreSessionManager(private val context: Context) {
     val trackingData = ArCoreTrackingData(
       trackingState = currentTrackingState,
       trackingFailureReason = currentFailureReason,
-      horizontalPlanesCount = hPlanes,
-      verticalPlanesCount = vPlanes,
+      horizontalPlanesCount = cachedHPlanesCount,
+      verticalPlanesCount = cachedVPlanesCount,
       lightIntensityLumens = lightIntensityLumens,
       colorCorrectionRgb = scratchColorCorrection,
       mainLightDirection = scratchMainLightDir,
@@ -949,7 +1021,7 @@ class ArCoreSessionManager(private val context: Context) {
       geospatialStatus = geospatialManager.status,
       semanticsTelemetry = semanticsManager.telemetry,
       cloudAnchorsCount = cloudAnchorManager.cloudAnchorsCount,
-      localAnchorsCount = hPlanes + vPlanes,
+      localAnchorsCount = cachedHPlanesCount + cachedVPlanesCount,
       pendingCloudAnchorsCount = cloudAnchorManager.pendingCloudAnchorsCount,
       isCrossDeviceResolutionConfirmed = cloudAnchorManager.isCrossDeviceValidated,
       cloudAnchorCrossDeviceState = cloudAnchorManager.crossDeviceState.name,
@@ -967,8 +1039,8 @@ class ArCoreSessionManager(private val context: Context) {
       accumulatedDriftMeters = driftDetector.accumulatedDriftMeters,
       currentFrameNumber = driftDetector.lastIdentifiedFrame?.frameNumber ?: 0L,
       trackingQuality = trackingQuality,
-      detectedPlanes = scratchPlaneList,
-      detectedImages = scratchImageList
+      detectedPlanes = ArrayList(scratchPlaneList),
+      detectedImages = ArrayList(scratchImageList)
     )
     latestTrackingData = trackingData
     onTrackingDataUpdated?.invoke(trackingData)

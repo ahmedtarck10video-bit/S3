@@ -410,8 +410,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
             // Depth Occlusion strictly tied to synchronized frame timestamp
             if (syncState.isDepthValid) {
-              val activeDist = if (syncState.primaryAnchorPose != null) {
-                val pose = syncState.primaryAnchorPose
+              val pose = syncState.primaryAnchorPose
+              val activeDist = if (pose != null) {
                 val camPos = syncState.cameraPosition
                 val dx = pose.tx() - camPos[0]
                 val dy = pose.ty() - camPos[1]
@@ -588,6 +588,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
         if (event.pointerCount == 2) {
           lastMidX = (event.getX(0) + event.getX(1)) * 0.5f
           lastMidY = (event.getY(0) + event.getY(1)) * 0.5f
+        } else if (event.pointerCount >= 3) {
+          lastMidX = (event.getX(0) + event.getX(1) + event.getX(2)) / 3f
+          lastMidY = (event.getY(0) + event.getY(1) + event.getY(2)) / 3f
         }
         return true
       }
@@ -598,9 +601,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val dy = event.y - lastTouchY
 
           if (displayMode == DisplayMode.OBJECT) {
-            // 1 FINGER DRAG -> Move / Reposition model
-            filamentEngine.panX = (filamentEngine.panX + dx * 0.0015f).coerceIn(-1.5f, 1.5f)
-            filamentEngine.panY = (filamentEngine.panY - dy * 0.0015f).coerceIn(-1.5f, 1.5f)
+            // 1 FINGER DRAG -> Move / Reposition model (Object Mode)
+            filamentEngine.modelOffsetX = (filamentEngine.modelOffsetX + dx * 0.0015f).coerceIn(-1.5f, 1.5f)
+            filamentEngine.modelOffsetY = (filamentEngine.modelOffsetY - dy * 0.0015f).coerceIn(-1.5f, 1.5f)
           } else {
             // 1 FINGER DRAG -> Move / Reposition model (AR & MR modes)
             filamentEngine.modelOffsetX += dx * 0.0015f
@@ -620,6 +623,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
           // Vertical / Drag -> Adjust pitch around model when not actively scaling or twisting
           if (!scaleGestureDetector.isInProgress && !rotateGestureDetector.isActivelyTwisting) {
             if (displayMode == DisplayMode.OBJECT) {
+              filamentEngine.modelPitchDegrees = (filamentEngine.modelPitchDegrees + dMidY * 0.45f) % 360f
               filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dMidY * 0.45f).coerceIn(-80f, 80f)
             } else {
               filamentEngine.modelPitchDegrees = (filamentEngine.modelPitchDegrees + dMidY * 0.45f) % 360f
@@ -654,17 +658,36 @@ class SpatialSurfaceView @JvmOverloads constructor(
       }
 
       MotionEvent.ACTION_POINTER_UP -> {
-        activePointerCount = event.pointerCount - 1
-        // Prevent sudden jumps when transitioning from 2 fingers to 1 finger
         val upIndex = event.actionIndex
-        val remainIndex = if (upIndex == 0) 1 else 0
-        if (remainIndex < event.pointerCount) {
-          lastTouchX = event.getX(remainIndex)
-          lastTouchY = event.getY(remainIndex)
-          touchStartX = lastTouchX
-          touchStartY = lastTouchY
-          touchStartTime = System.currentTimeMillis()
+        val remainCount = event.pointerCount - 1
+        activePointerCount = remainCount
+        // Prevent sudden jumps when transitioning from 2 fingers to 1 finger or 3 to 2
+        if (remainCount == 1) {
+          val remainIndex = if (upIndex == 0) 1 else 0
+          if (remainIndex < event.pointerCount) {
+            lastTouchX = event.getX(remainIndex)
+            lastTouchY = event.getY(remainIndex)
+            touchStartX = lastTouchX
+            touchStartY = lastTouchY
+            touchStartTime = System.currentTimeMillis()
+          }
+        } else if (remainCount == 2) {
+          var sumX = 0f
+          var sumY = 0f
+          for (i in 0 until event.pointerCount) {
+            if (i != upIndex) {
+              sumX += event.getX(i)
+              sumY += event.getY(i)
+            }
+          }
+          lastMidX = sumX * 0.5f
+          lastMidY = sumY * 0.5f
         }
+        return true
+      }
+
+      MotionEvent.ACTION_CANCEL -> {
+        activePointerCount = 0
         return true
       }
     }

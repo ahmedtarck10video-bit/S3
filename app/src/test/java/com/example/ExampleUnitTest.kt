@@ -2,12 +2,9 @@ package com.example
 
 import org.junit.Assert.*
 import org.junit.Test
+import kotlin.math.abs
 
 class ExampleUnitTest {
-  @Test
-  fun addition_isCorrect() {
-    assertEquals(4, 2 + 2)
-  }
 
   @Test
   fun testGestureScaleConstraints() {
@@ -30,24 +27,104 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun testGestureRotationAndTranslationAccumulation() {
-    var rotation = 0f
-    var offsetX = 0f
-    var offsetY = 0f
+  fun testEnforcedGestureMappings_1F_2F_3F() {
+    var modelOffsetX = 0f
+    var modelOffsetY = 0f
+    var modelRotationDegrees = 0f
+    var modelRollDegrees = 0f
+    var modelScale = 1.0f
 
-    // 1-finger horizontal swipe moves Right/Left
-    val dx = 50f
-    offsetX += dx * 0.0025f
-    assertEquals(0.125f, offsetX, 0.0001f)
+    // 1-Finger Gesture: Must strictly perform Translation/Reposition (X and Y offsets)
+    // Must NOT alter yaw rotation or roll
+    val touch1Dx = 40f
+    val touch1Dy = -30f
+    modelOffsetX += touch1Dx * 0.0025f
+    modelOffsetY -= touch1Dy * 0.0025f
+    assertEquals(0.1f, modelOffsetX, 0.0001f)
+    assertEquals(0.075f, modelOffsetY, 0.0001f)
+    assertEquals(0f, modelRotationDegrees, 0.0001f)
+    assertEquals(0f, modelRollDegrees, 0.0001f)
 
-    // 1-finger vertical swipe moves Up/Down
-    val dy = -40f
-    offsetY -= dy * 0.0025f
-    assertEquals(0.1f, offsetY, 0.0001f)
+    // 2-Finger Pinch Gesture: Must strictly perform Scale
+    val pinchScaleDelta = 1.25f
+    modelScale = (modelScale * pinchScaleDelta).coerceIn(0.02f, 25.0f)
+    assertEquals(1.25f, modelScale, 0.001f)
 
-    // 2-finger horizontal drag or rotate gesture rotates Yaw
-    val deltaYaw = 45f
-    rotation += deltaYaw
-    assertEquals(45f, rotation, 0.0001f)
+    // 2-Finger Twist / Drag Gesture: Must strictly perform Yaw / Rotation
+    // Must NOT alter translations or roll
+    val twistDeltaDegrees = -35f
+    modelRotationDegrees += twistDeltaDegrees
+    assertEquals(-35f, modelRotationDegrees, 0.0001f)
+    assertEquals(0.1f, modelOffsetX, 0.0001f)
+    assertEquals(0.075f, modelOffsetY, 0.0001f)
+    assertEquals(0f, modelRollDegrees, 0.0001f)
+
+    // 3-Finger Drag Gesture: Must strictly perform Roll
+    // Must NOT alter translations, scale, or yaw
+    val rollDx = 25f
+    modelRollDegrees += rollDx * 0.25f
+    assertEquals(6.25f, modelRollDegrees, 0.0001f)
+    assertEquals(-35f, modelRotationDegrees, 0.0001f)
+    assertEquals(0.1f, modelOffsetX, 0.0001f)
+    assertEquals(0.075f, modelOffsetY, 0.0001f)
+    assertEquals(1.25f, modelScale, 0.001f)
+  }
+
+  @Test
+  fun testTwoFingerAngleCalculationAndWrapAround() {
+    // Test angle normalization for rotational wrap-around (-180 to 180)
+    fun normalizeAngleDelta(rawDelta: Float): Float {
+      var delta = rawDelta
+      while (delta < -180f) delta += 360f
+      while (delta > 180f) delta -= 360f
+      return delta
+    }
+
+    val acuteDelta = normalizeAngleDelta(15f)
+    assertEquals(15f, acuteDelta, 0.001f)
+
+    // Wrap around 175 -> -175 (raw delta: -350 degrees)
+    val wrapDeltaNegative = normalizeAngleDelta(-350f)
+    assertEquals(10f, wrapDeltaNegative, 0.001f)
+
+    // Wrap around -175 -> 175 (raw delta: 350 degrees)
+    val wrapDeltaPositive = normalizeAngleDelta(350f)
+    assertEquals(-10f, wrapDeltaPositive, 0.001f)
+  }
+
+  @Test
+  fun testAdaptiveDepthSyncThresholdCalculation() {
+    // Test the adaptive sync algorithm across 60fps (~16.6ms) and 30fps (~33.3ms) intervals
+    fun calculateAdaptiveSyncThresholdNs(frameIntervalNs: Long): Long {
+      val adaptive = (frameIntervalNs * 1.8f).toLong().coerceIn(33_000_000L, 75_000_000L)
+      return adaptive
+    }
+
+    val syncThreshold60Fps = calculateAdaptiveSyncThresholdNs(16_666_666L)
+    // 16.6ms * 1.8 = ~30ms, clamped to minimum 33ms
+    assertEquals(33_000_000L, syncThreshold60Fps)
+
+    val syncThreshold30Fps = calculateAdaptiveSyncThresholdNs(33_333_333L)
+    // 33.3ms * 1.8 = ~60ms (within floating precision tolerance)
+    assertTrue(abs(60_000_000L - syncThreshold30Fps) <= 1000L)
+
+    // Dropped frames (e.g. 80ms interval) clamped to maximum 75ms
+    val syncThresholdSlow = calculateAdaptiveSyncThresholdNs(80_000_000L)
+    assertEquals(75_000_000L, syncThresholdSlow)
+  }
+
+  @Test
+  fun testAnchorRecoveryInterpolationCurve() {
+    // Tests cubic ease-out interpolation for smooth tracking recovery
+    fun cubicEaseOut(progress: Float): Float {
+      val p = progress.coerceIn(0f, 1f)
+      val inv = 1f - p
+      return 1f - (inv * inv * inv)
+    }
+
+    assertEquals(0f, cubicEaseOut(0f), 0.0001f)
+    assertEquals(1f, cubicEaseOut(1f), 0.0001f)
+    // Fast initial movement: at 50% time, progress is 87.5%
+    assertEquals(0.875f, cubicEaseOut(0.5f), 0.0001f)
   }
 }

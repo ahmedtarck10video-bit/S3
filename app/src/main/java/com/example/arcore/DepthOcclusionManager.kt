@@ -67,6 +67,34 @@ class DepthOcclusionManager {
   val isDepthAvailable: Boolean
     get() = isDepthTextureReady || depthCoveragePercentage > 0f || (averageDepthMeters > 0.05f)
 
+  // Dynamic frame-interval tracking for adaptive camera-depth synchronization
+  private var lastCameraTimestampNs: Long = 0L
+  private var smoothedFrameIntervalNs: Long = 33_333_333L // Default ~30fps interval
+  var currentAdaptiveSyncThresholdNs: Long = 66_000_000L
+    private set
+
+  // Pre-allocated GPU texture dimensions to avoid per-frame re-allocation
+  private var allocatedTexWidth: Int = 0
+  private var allocatedTexHeight: Int = 0
+
+  /**
+   * Computes an adaptive synchronization window based on actual measured camera frame rate.
+   * At 60fps (~16.6ms), tightens sync threshold to ~33ms to reject stale depth faster.
+   * At 30fps (~33.3ms), allows up to ~60-66ms to accommodate hardware depth sensor latency.
+   */
+  fun calculateAdaptiveSyncThresholdNs(cameraTimestampNs: Long): Long {
+    if (lastCameraTimestampNs > 0L) {
+      val delta = cameraTimestampNs - lastCameraTimestampNs
+      if (delta in 8_000_000L..100_000_000L) {
+        smoothedFrameIntervalNs = (smoothedFrameIntervalNs * 3 + delta) / 4
+      }
+    }
+    lastCameraTimestampNs = cameraTimestampNs
+    val adaptive = (smoothedFrameIntervalNs * 1.8f).toLong().coerceIn(33_000_000L, 75_000_000L)
+    currentAdaptiveSyncThresholdNs = adaptive
+    return adaptive
+  }
+
   // Preallocated direct buffer for GPU depth texture upload (zero per-frame allocations)
   private var gpuUploadBuffer: ByteBuffer = ByteBuffer.allocateDirect(MAX_DEPTH_WIDTH * MAX_DEPTH_HEIGHT * 2)
     .order(ByteOrder.LITTLE_ENDIAN)
@@ -144,6 +172,8 @@ class DepthOcclusionManager {
    */
   fun resetGpuTextureOnContextLoss() {
     depthTextureId = 0
+    allocatedTexWidth = 0
+    allocatedTexHeight = 0
     isDepthTextureReady = false
     initializeGpuTexture()
   }
@@ -203,13 +233,13 @@ class DepthOcclusionManager {
       val planes = depthImage.planes
       if (planes.isEmpty()) return
 
-      // Synchronize depth frame with camera frame timestamp
+      // Synchronize depth frame with camera frame timestamp adaptively
       val depthTimestampNs = depthImage.timestamp
       val cameraTimestampNs = frame.timestamp
       latestDepthTimestampNs = depthTimestampNs
       frameSyncDeltaNs = Math.abs(cameraTimestampNs - depthTimestampNs)
-      // Frame is considered synchronized if within ~2 frames at 30fps (66ms)
-      isSynchronizedWithCamera = frameSyncDeltaNs <= 66_000_000L
+      val adaptiveSyncThresholdNs = calculateAdaptiveSyncThresholdNs(cameraTimestampNs)
+      isSynchronizedWithCamera = frameSyncDeltaNs <= adaptiveSyncThresholdNs
 
       if (!isSynchronizedWithCamera) {
         // Desynchronized depth frame: camera has moved and optical axes will not align.
@@ -271,20 +301,38 @@ class DepthOcclusionManager {
         averageDepthMeters = (depthSum / validCount).toFloat()
       }
 
-      // Upload to OpenGL Depth Texture
+      // Upload to OpenGL Depth Texture with persistent allocation + glTexSubImage2D
       if (depthTextureId != 0) {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTextureId)
-        GLES20.glTexImage2D(
-          GLES20.GL_TEXTURE_2D,
-          0,
-          GLES20.GL_LUMINANCE_ALPHA,
-          width,
-          height,
-          0,
-          GLES20.GL_LUMINANCE_ALPHA,
-          GLES20.GL_UNSIGNED_BYTE,
-          gpuUploadBuffer
-        )
+        if (width != allocatedTexWidth || height != allocatedTexHeight) {
+          // Re-allocate / allocate persistent texture storage on resolution change
+          GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D,
+            0,
+            GLES20.GL_LUMINANCE_ALPHA,
+            width,
+            height,
+            0,
+            GLES20.GL_LUMINANCE_ALPHA,
+            GLES20.GL_UNSIGNED_BYTE,
+            gpuUploadBuffer
+          )
+          allocatedTexWidth = width
+          allocatedTexHeight = height
+        } else {
+          // Zero GPU churn: high-speed sub-image update into existing storage
+          GLES20.glTexSubImage2D(
+            GLES20.GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            width,
+            height,
+            GLES20.GL_LUMINANCE_ALPHA,
+            GLES20.GL_UNSIGNED_BYTE,
+            gpuUploadBuffer
+          )
+        }
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
         isDepthTextureReady = true
       }
@@ -538,6 +586,8 @@ class DepthOcclusionManager {
     if (depthTextureId != 0) {
       GLES20.glDeleteTextures(1, intArrayOf(depthTextureId), 0)
       depthTextureId = 0
+      allocatedTexWidth = 0
+      allocatedTexHeight = 0
       isDepthTextureReady = false
     }
   }
