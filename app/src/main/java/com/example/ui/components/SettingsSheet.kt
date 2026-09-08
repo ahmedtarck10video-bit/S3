@@ -52,6 +52,8 @@ fun SettingsSheet(
   onIpdChange: (Float) -> Unit,
   showDiagnostics: Boolean,
   onDiagnosticsChange: (Boolean) -> Unit,
+  modelRollDegrees: Float = 0f,
+  onRollChange: (Float) -> Unit = {},
   onResetScene: () -> Unit,
   onDismiss: () -> Unit
 ) {
@@ -159,6 +161,35 @@ fun SettingsSheet(
         value = ipdMm,
         onValueChange = onIpdChange,
         valueRange = 52.0f..74.0f,
+        colors = SliderDefaults.colors(
+          thumbColor = Color(0xFF38BDF8),
+          activeTrackColor = Color(0xFF38BDF8)
+        )
+      )
+
+      Spacer(modifier = Modifier.height(12.dp))
+
+      // Section: 3-Axis Orientation (Roll / Z-Axis)
+      Text(
+        text = "3-AXIS ORIENTATION (ROLL / Z-AXIS)",
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        color = Color(0xFF38BDF8),
+        letterSpacing = 1.sp
+      )
+      Spacer(modifier = Modifier.height(8.dp))
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Text("Roll (Z-Axis): ${modelRollDegrees.toInt()}°", color = Color.White, fontSize = 14.sp)
+      }
+      Slider(
+        value = modelRollDegrees,
+        onValueChange = onRollChange,
+        valueRange = -180.0f..180.0f,
         colors = SliderDefaults.colors(
           thumbColor = Color(0xFF38BDF8),
           activeTrackColor = Color(0xFF38BDF8)

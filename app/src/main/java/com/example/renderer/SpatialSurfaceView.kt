@@ -127,6 +127,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
   var onAnchorPlaced: ((Anchor, FloatArray, ExhibitSource, String, String) -> Unit)? = null
   var onExhibitMarkerRecognized: ((ExhibitMarker, FloatArray) -> Unit)? = null
   var onScreenToggled: (() -> Unit)? = null
+  var onRollDegreesChanged: ((Float) -> Unit)? = null
 
   // Latest AR tracking data
   private var latestTrackingData = ArCoreTrackingData()
@@ -146,8 +147,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
     android.opengl.Matrix.setIdentityM(this, 0)
   }
   private var hasStoredHeadPose: Boolean = false
-  // Map of last valid pose per anchor hash to hold anchors in world space during tracking pause
-  private val anchorLastKnownPoses = mutableMapOf<Int, Pose>()
+  // Last valid pose to hold primary anchor in world space during tracking pause
+  private var lastKnownPrimaryPose: Pose? = null
 
   // Gesture state: seamless finger interaction for Rotate, Move, and Scale
   private var consecutiveNullFrames: Int = 0
@@ -202,8 +203,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
       if (displayMode == DisplayMode.OBJECT) {
         filamentEngine.orbitYaw -= deltaDegrees
       } else {
-        // Z-axis Roll rotation with full 360-degree range
-        filamentEngine.modelRollDegrees = (filamentEngine.modelRollDegrees - deltaDegrees) % 360f
+        // 2 FINGER TWIST -> Rotate around the model (Yaw)
+        filamentEngine.modelRotationDegrees = (filamentEngine.modelRotationDegrees - deltaDegrees) % 360f
       }
     }
   }
@@ -466,11 +467,11 @@ class SpatialSurfaceView @JvmOverloads constructor(
               if (placementMode == WorldPlacementMode.ANCHORED_WORLD) {
                 val reconciledPose = syncState.primaryAnchorPose
                 if (reconciledPose != null) {
-                  anchorLastKnownPoses[reconciledPose.hashCode()] = reconciledPose
+                  lastKnownPrimaryPose = reconciledPose
                   filamentEngine.updateAnchorPose(currentAsset, reconciledPose)
                 } else {
                   // Controlled Recovery: Hold at last known pose during tracking pause to eliminate jumping
-                  anchorLastKnownPoses.values.lastOrNull()?.let { lastPose ->
+                  lastKnownPrimaryPose?.let { lastPose ->
                     filamentEngine.updateAnchorPose(currentAsset, lastPose)
                   }
                 }
@@ -537,10 +538,10 @@ class SpatialSurfaceView @JvmOverloads constructor(
             if (placementMode == WorldPlacementMode.ANCHORED_WORLD) {
               val reconciledPose = syncState?.primaryAnchorPose
               if (reconciledPose != null) {
-                anchorLastKnownPoses[reconciledPose.hashCode()] = reconciledPose
+                lastKnownPrimaryPose = reconciledPose
                 filamentEngine.updateAnchorPose(currentAsset, reconciledPose)
               } else {
-                anchorLastKnownPoses.values.lastOrNull()?.let { lastPose ->
+                lastKnownPrimaryPose?.let { lastPose ->
                   filamentEngine.updateAnchorPose(currentAsset, lastPose)
                 }
               }
@@ -597,14 +598,13 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val dy = event.y - lastTouchY
 
           if (displayMode == DisplayMode.OBJECT) {
-            filamentEngine.orbitYaw -= dx * 0.45f
-            filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dy * 0.45f).coerceIn(-80f, 80f)
+            // 1 FINGER DRAG -> Move / Reposition model
+            filamentEngine.panX = (filamentEngine.panX + dx * 0.0015f).coerceIn(-1.5f, 1.5f)
+            filamentEngine.panY = (filamentEngine.panY - dy * 0.0015f).coerceIn(-1.5f, 1.5f)
           } else {
-            // 1 finger = Y-axis Yaw (horizontal drag) and X-axis Pitch (vertical drag) rotation with full 360° range
-            // Preserve the current left/right rotation direction exactly. DO NOT reverse it.
-            filamentEngine.modelRotationDegrees = (filamentEngine.modelRotationDegrees - dx * 0.45f) % 360f
-            // Vertical drag rotates top-to-bottom around model's centroid, NOT translating vertically:
-            filamentEngine.modelPitchDegrees = (filamentEngine.modelPitchDegrees + dy * 0.45f) % 360f
+            // 1 FINGER DRAG -> Move / Reposition model (AR & MR modes)
+            filamentEngine.modelOffsetX += dx * 0.0015f
+            filamentEngine.modelOffsetY -= dy * 0.0015f
           }
           lastTouchX = event.x
           lastTouchY = event.y
@@ -614,18 +614,28 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val dMidX = midX - lastMidX
           val dMidY = midY - lastMidY
 
-          // 2 fingers = Move / Reposition / Pan strictly separated from rotation (only when not scaling or twisting)
+          // 2 FINGER GESTURES:
+          // Pinch -> Handled by scaleGestureDetector (Scale)
+          // Twist -> Handled by rotateGestureDetector (Rotate Yaw)
+          // Vertical / Drag -> Adjust pitch around model when not actively scaling or twisting
           if (!scaleGestureDetector.isInProgress && !rotateGestureDetector.isActivelyTwisting) {
             if (displayMode == DisplayMode.OBJECT) {
-              filamentEngine.panX = (filamentEngine.panX + dMidX * 0.003f).coerceIn(-0.35f, 0.35f)
-              filamentEngine.panY = (filamentEngine.panY - dMidY * 0.003f).coerceIn(-0.25f, 0.25f)
+              filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dMidY * 0.45f).coerceIn(-80f, 80f)
             } else {
-              filamentEngine.modelOffsetX += dMidX * 0.0025f
-              filamentEngine.modelOffsetY -= dMidY * 0.0025f
+              filamentEngine.modelPitchDegrees = (filamentEngine.modelPitchDegrees + dMidY * 0.45f) % 360f
             }
           }
           lastMidX = midX
           lastMidY = midY
+        } else if (event.pointerCount >= 3) {
+          val midX = (event.getX(0) + event.getX(1) + event.getX(2)) / 3f
+          val dMidX = midX - lastMidX
+          // 3 FINGER DRAG -> Roll (Z-axis) rotation around the model
+          if (abs(dMidX) > 0.5f) {
+            filamentEngine.modelRollDegrees = (filamentEngine.modelRollDegrees + dMidX * 0.45f) % 360f
+            onRollDegreesChanged?.invoke(filamentEngine.modelRollDegrees)
+          }
+          lastMidX = midX
         }
         return true
       }
@@ -651,6 +661,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
         if (remainIndex < event.pointerCount) {
           lastTouchX = event.getX(remainIndex)
           lastTouchY = event.getY(remainIndex)
+          touchStartX = lastTouchX
+          touchStartY = lastTouchY
+          touchStartTime = System.currentTimeMillis()
         }
         return true
       }
@@ -686,7 +699,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
         DiagnosticsLogger.log(TAG, "Placement deferred: Camera tracking not yet stable (${frame.camera.trackingState})")
         return
       }
-      val hit = arCoreSessionManager.hitTest(frame, mappedX, yPx)
+      val hit = arCoreSessionManager.performComprehensiveHitTest(frame, mappedX, yPx, width, height)
       if (hit != null) {
         val hitPose = hit.hitPose
         val hx = hitPose.tx()
@@ -709,7 +722,11 @@ class SpatialSurfaceView @JvmOverloads constructor(
           }
         }
 
-        val anchor = arCoreSessionManager.createAnchor(hit)
+        val anchor = if (hit.hitResult != null) {
+          arCoreSessionManager.createAnchor(hit.hitResult)
+        } else {
+          arCoreSessionManager.createAnchor(hitPose)
+        }
         if (anchor != null) {
           for (oldAnchor in activeArAnchors) {
             try { oldAnchor.detach() } catch (_: Exception) {}
@@ -729,9 +746,14 @@ class SpatialSurfaceView @JvmOverloads constructor(
             filamentEngine.updateAnchorPose(currentAsset, anchor.pose)
           }
 
-          onAnchorPlaced?.invoke(anchor, posArr, ExhibitSource.PLANE_TAP, currentSelectedModelId, currentSelectedModelTitle)
-          Log.i(TAG, "ARCore Anchor pinned on plane at: $hx, $hy, $hz")
-          DiagnosticsLogger.log(TAG, "Placed Anchor at ($hx, $hy, $hz)")
+          val source = when {
+            hit.isInstantTentative -> ExhibitSource.INSTANT_PLACEMENT
+            hit.hitType.name.contains("DEPTH") -> ExhibitSource.DEPTH_HIT
+            else -> ExhibitSource.PLANE_TAP
+          }
+          onAnchorPlaced?.invoke(anchor, posArr, source, currentSelectedModelId, currentSelectedModelTitle)
+          Log.i(TAG, "ARCore Anchor pinned via ${hit.hitType} at: $hx, $hy, $hz")
+          DiagnosticsLogger.log(TAG, "Placed Anchor via ${hit.hitType} at ($hx, $hy, $hz)")
         }
       }
     } catch (e: Exception) {
@@ -791,7 +813,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
     }
     activeArAnchors.clear()
     spawnedMarkerIds.clear()
-    anchorLastKnownPoses.clear()
+    lastKnownPrimaryPose = null
     hasStoredHeadPose = false
     currentSelectedModelId = ""
     currentSelectedModelTitle = ""
@@ -805,7 +827,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
     depthOcclusionManager.clear()
     arCoreSessionManager.environmentalMeshManager.clear()
     clearAnchors()
-    anchorLastKnownPoses.clear()
+    lastKnownPrimaryPose = null
     hasStoredHeadPose = false
     arCoreSessionManager.handleTrackingLostOrReset(resetSession = false)
     arCoreSessionManager.resetWalkingOrigin()

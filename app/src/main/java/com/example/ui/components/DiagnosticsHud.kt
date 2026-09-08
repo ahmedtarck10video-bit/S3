@@ -233,6 +233,32 @@ fun DiagnosticsHud(
 
       Row(
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        val driftText = if (telemetry.isDriftActive) {
+          "DRIFT: Start Frame #${telemetry.driftStartFrameIndex ?: 0} (${telemetry.driftCategory}) Δ=${"%.3f".format(telemetry.accumulatedDriftMeters)}m"
+        } else {
+          "DRIFT: NONE (Frame #${telemetry.currentFrameNumber} Stable)"
+        }
+        val driftColor = if (telemetry.isDriftActive) Color(0xFFEF4444) else Color(0xFF4ADE80)
+        Text(
+          text = driftText,
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          fontWeight = if (telemetry.isDriftActive) FontWeight.Bold else FontWeight.Normal,
+          color = driftColor
+        )
+        Text(
+          text = "Quality: ${telemetry.trackingQuality}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = if (telemetry.trackingQuality == "OPTIMAL_6DOF") Color(0xFF4ADE80) else Color(0xFFFBBF24)
+        )
+      }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
       ) {
         Text(

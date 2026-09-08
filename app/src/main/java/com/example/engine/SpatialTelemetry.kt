@@ -86,6 +86,13 @@ data class TelemetryState(
   val isValidatedLocalSceneMesh: Boolean = false,
   val isFull3dSceneReconstruction: Boolean = false,
   val reconstructionStage: String = "IDLE",
+  val isDriftActive: Boolean = false,
+  val driftStartFrameIndex: Long? = null,
+  val driftCategory: String = "NONE",
+  val accumulatedDriftMeters: Float = 0f,
+  val currentFrameNumber: Long = 0L,
+  val trackingQuality: String = "OPTIMAL_6DOF",
+  val modelRollDegrees: Float = 0f,
   val logs: List<LogEntry> = emptyList()
 )
 

@@ -84,6 +84,8 @@ import com.example.ui.components.ExhibitMarkerGuideSheet
 import com.example.ui.components.ModelSelectorSheet
 import com.example.ui.components.SettingsSheet
 import com.example.ui.components.TopModePill
+import com.example.ui.components.TrackingQualityIndicator
+import com.example.ui.components.PlacementGuidanceOverlay
 import com.example.ui.components.TrackingRecoveryCard
 import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.SpatialViewModel
@@ -163,6 +165,7 @@ fun MixedRealityScreen(
   val ambientIntensity by viewModel.ambientIntensity.collectAsState()
   val sunIntensity by viewModel.sunIntensity.collectAsState()
   val ipdMm by viewModel.ipdMm.collectAsState()
+  val modelRollDegrees by viewModel.modelRollDegrees.collectAsState()
   val telemetry by viewModel.telemetry.collectAsState()
   val nearbyExhibit by viewModel.nearbyExhibit.collectAsState()
   val arAnchors by viewModel.arAnchors.collectAsState()
@@ -274,6 +277,9 @@ fun MixedRealityScreen(
         hapticManager.performClick()
         viewModel.toggleFullscreenUi()
       }
+      onRollDegreesChanged = { roll ->
+        viewModel.setModelRollDegrees(roll)
+      }
       onSurfaceViewCreated(this)
     }
   }
@@ -323,6 +329,10 @@ fun MixedRealityScreen(
 
   LaunchedEffect(sunIntensity) {
     spatialSurfaceView.filamentEngine.sunIntensity = sunIntensity
+  }
+
+  LaunchedEffect(modelRollDegrees) {
+    spatialSurfaceView.filamentEngine.modelRollDegrees = modelRollDegrees
   }
 
   // Toast listener
@@ -405,15 +415,24 @@ fun MixedRealityScreen(
         modifier = Modifier
           .fillMaxWidth()
           .statusBarsPadding()
-          .padding(top = 12.dp)
+          .padding(top = 12.dp, start = 16.dp, end = 16.dp)
       ) {
         TopModePill(
           currentMode = displayMode,
           onModeSelected = { newMode ->
             hapticManager.performHeavy()
             viewModel.setDisplayMode(newMode)
-          }
+          },
+          modifier = Modifier.align(Alignment.Center)
         )
+
+        // Tracking Quality Indicator (AR & MR Modes)
+        if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
+          TrackingQualityIndicator(
+            telemetry = telemetry,
+            modifier = Modifier.align(Alignment.CenterEnd)
+          )
+        }
       }
     }
 
@@ -453,6 +472,23 @@ fun MixedRealityScreen(
         .padding(top = 76.dp)
         .align(Alignment.TopCenter)
     )
+
+    // Placement Guidance Overlay (AR & MR Modes)
+    AnimatedVisibility(
+      visible = uiVisibilityState == UiVisibilityState.NORMAL_UI,
+      enter = fadeIn(),
+      exit = fadeOut(),
+      modifier = Modifier
+        .align(Alignment.BottomCenter)
+        .navigationBarsPadding()
+        .padding(bottom = 90.dp)
+    ) {
+      PlacementGuidanceOverlay(
+        displayMode = displayMode,
+        telemetry = telemetry,
+        hasPlacedAnchor = arAnchors.isNotEmpty()
+      )
+    }
 
     // 8. BOTTOM CONTROLS: Floating Action Pill [ PHOTO | (● REC) | Open | Clear ]
     AnimatedVisibility(
@@ -552,8 +588,11 @@ fun MixedRealityScreen(
         onIpdChange = { viewModel.setIpdMm(it) },
         showDiagnostics = showDiagnostics,
         onDiagnosticsChange = { viewModel.setShowDiagnostics(it) },
+        modelRollDegrees = modelRollDegrees,
+        onRollChange = { viewModel.setModelRollDegrees(it) },
         onResetScene = {
           spatialSurfaceView.resetView()
+          viewModel.setModelRollDegrees(0f)
           viewModel.resetOrRestoreModel()
           viewModel.setShowSettings(false)
         },

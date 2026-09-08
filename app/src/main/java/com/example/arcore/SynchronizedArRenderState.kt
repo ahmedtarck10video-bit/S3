@@ -116,16 +116,31 @@ class AnchorRecoveryTracker {
 
         val targetPose = anchor.pose
         if (state.recoveryProgress < 1.0f) {
-          // Advance recovery over ~150ms (approx 8-10 frames at 60fps)
-          val step = if (deltaTimeSec > 0f) minOf(1.0f, deltaTimeSec / 0.150f) else 0.125f
+          // Advance recovery over ~180ms with cubic ease-out curve
+          val step = if (deltaTimeSec > 0f) minOf(1.0f, deltaTimeSec / 0.180f) else 0.10f
           state.recoveryProgress = minOf(1.0f, state.recoveryProgress + step)
-          val interpolated = interpolatePose(state.recoveryStartPose, targetPose, state.recoveryProgress)
+          val t = 1.0f - (1.0f - state.recoveryProgress).let { it * it * it }
+          val interpolated = interpolatePose(state.recoveryStartPose, targetPose, t)
           state.lastStablePose = interpolated
           Pair(interpolated, true)
         } else {
-          // Steady tracking: zero artificial lag/smoothing
-          state.lastStablePose = targetPose
-          Pair(targetPose, false)
+          // Relocalization / Instant Placement convergence check:
+          // If anchor pose shifted significantly (> 3.5cm) while tracking, interpolate smoothly
+          val dx = targetPose.tx() - state.lastStablePose.tx()
+          val dy = targetPose.ty() - state.lastStablePose.ty()
+          val dz = targetPose.tz() - state.lastStablePose.tz()
+          val jumpDist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+          if (jumpDist > 0.035f && state.stableFrameCount > 5) {
+            state.recoveryProgress = 0.0f
+            state.recoveryStartPose = state.lastStablePose
+            val interpolated = interpolatePose(state.recoveryStartPose, targetPose, 0.08f)
+            state.lastStablePose = interpolated
+            Pair(interpolated, true)
+          } else {
+            // Steady tracking: zero artificial lag
+            state.lastStablePose = targetPose
+            Pair(targetPose, false)
+          }
         }
       }
       TrackingState.PAUSED -> {

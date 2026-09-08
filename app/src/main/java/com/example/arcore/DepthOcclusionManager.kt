@@ -468,6 +468,41 @@ class DepthOcclusionManager {
   ): Boolean = isPixelOccluded(frame, viewX, viewY, virtualDepthMeters, 1.0f)
 
   /**
+   * Samples raw physical depth in meters at normalized view coordinates [0..1].
+   * Returns null if unmeasured, invalid, or out of reliable sensing bounds.
+   */
+  fun sampleDepthMetersAtViewCoord(frame: Frame, viewNormX: Float, viewNormY: Float): Float? {
+    if (depthWidth <= 0 || depthHeight <= 0) return null
+    viewCoordScratch[0] = viewNormX.coerceIn(0f, 1f)
+    viewCoordScratch[1] = viewNormY.coerceIn(0f, 1f)
+    return try {
+      frame.transformCoordinates2d(
+        Coordinates2d.VIEW_NORMALIZED,
+        viewCoordScratch,
+        Coordinates2d.IMAGE_NORMALIZED,
+        depthCoordScratch
+      )
+      val depthNormX = depthCoordScratch[0].coerceIn(0f, 1f)
+      val depthNormY = depthCoordScratch[1].coerceIn(0f, 1f)
+      val px = (depthNormX * (depthWidth - 1)).toInt()
+      val py = (depthNormY * (depthHeight - 1)).toInt()
+      val idx = py * depthWidth + px
+      if (idx in depthPixels.indices) {
+        val depthMm = depthPixels[idx].toInt() and 0xFFFF
+        if (depthMm in 100..12000) {
+          depthMm / 1000.0f
+        } else {
+          null
+        }
+      } else {
+        null
+      }
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  /**
    * Binds the GPU depth texture to an active OpenGL texture unit.
    */
   fun bindDepthTexture(textureUnit: Int) {

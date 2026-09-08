@@ -10,8 +10,10 @@ import com.example.model.SpatialModel
 import com.example.parser.GltfAssetFactory
 
 enum class ExhibitSource {
-  PLANE_TAP,      // Placed manually on detected horizontal/vertical plane
-  IMAGE_MARKER    // Automatically spawned and anchored on recognized physical image marker
+  PLANE_TAP,         // Placed manually on detected horizontal/vertical plane
+  INSTANT_PLACEMENT, // Placed via Instant Placement before surface fully tracked
+  DEPTH_HIT,         // Placed via Depth Point Cloud / Depth Map Hit
+  IMAGE_MARKER       // Automatically spawned and anchored on recognized physical image marker
 }
 
 data class ExhibitMarker(

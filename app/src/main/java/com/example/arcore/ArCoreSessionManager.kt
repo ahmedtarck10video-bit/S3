@@ -103,6 +103,12 @@ data class ArCoreTrackingData(
   val isLoopbackTestActive: Boolean = false,
   val multiplayerMode: String = "OFFLINE",
   val certification: DeviceCapabilityCertification? = null,
+  val isDriftActive: Boolean = false,
+  val driftStartFrameIndex: Long? = null,
+  val driftCategory: String = "NONE",
+  val accumulatedDriftMeters: Float = 0f,
+  val currentFrameNumber: Long = 0L,
+  val trackingQuality: String = "OPTIMAL_6DOF",
   val detectedPlanes: List<DetectedPlaneInfo> = emptyList(),
   val detectedImages: List<DetectedImageInfo> = emptyList()
 )
@@ -181,6 +187,7 @@ class ArCoreSessionManager(private val context: Context) {
 
   // Synchronization & Controlled Anchor Recovery
   val anchorRecoveryTracker = AnchorRecoveryTracker()
+  val driftDetector = com.example.engine.DriftDetector()
   private val registeredAnchors = java.util.concurrent.CopyOnWriteArrayList<Anchor>()
   var primaryAnchor: Anchor? = null
 
@@ -576,6 +583,13 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
+      // Evaluate drift and tracking degradation frame-by-frame
+      driftDetector.evaluateFrame(
+        frameTimestampNs = frameTimestampNs,
+        camera = camera,
+        featurePointsCount = cachedPointCloudCount
+      )
+
       // Camera Forward Vector derived from View Matrix
       scratchCamForward[0] = -scratchViewMatrix[2]
       scratchCamForward[1] = -scratchViewMatrix[6]
@@ -889,9 +903,33 @@ class ArCoreSessionManager(private val context: Context) {
       Log.w(TAG, "Non-critical feature update notice: ${e.message}")
     }
 
+    val currentTrackingState = frame.camera.trackingState
+    val currentFailureReason = frame.camera.trackingFailureReason
+    val trackingQuality = when (currentTrackingState) {
+      TrackingState.TRACKING -> {
+        if (driftDetector.isDriftActive) {
+          "DRIFT_DETECTED"
+        } else if (cachedPointCloudCount < 20) {
+          "LIMITED_LOW_FEATURES"
+        } else {
+          "OPTIMAL_6DOF"
+        }
+      }
+      TrackingState.PAUSED -> {
+        when (currentFailureReason) {
+          TrackingFailureReason.INSUFFICIENT_LIGHT -> "LIMITED_LOW_LIGHT"
+          TrackingFailureReason.EXCESSIVE_MOTION -> "LIMITED_FAST_MOTION"
+          TrackingFailureReason.INSUFFICIENT_FEATURES -> "LIMITED_LOW_FEATURES"
+          TrackingFailureReason.BAD_STATE -> "REINITIALIZING"
+          else -> "SEARCHING_SURFACES"
+        }
+      }
+      TrackingState.STOPPED -> "STOPPED"
+    }
+
     val trackingData = ArCoreTrackingData(
-      trackingState = frame.camera.trackingState,
-      trackingFailureReason = frame.camera.trackingFailureReason,
+      trackingState = currentTrackingState,
+      trackingFailureReason = currentFailureReason,
       horizontalPlanesCount = hPlanes,
       verticalPlanesCount = vPlanes,
       lightIntensityLumens = lightIntensityLumens,
@@ -923,6 +961,12 @@ class ArCoreSessionManager(private val context: Context) {
       isLoopbackTestActive = multiplayerBackend.isLoopbackTestActive,
       multiplayerMode = multiplayerBackend.multiplayerStatus,
       certification = deviceCertification,
+      isDriftActive = driftDetector.isDriftActive,
+      driftStartFrameIndex = driftDetector.driftStartFrameIndex,
+      driftCategory = driftDetector.driftCategory,
+      accumulatedDriftMeters = driftDetector.accumulatedDriftMeters,
+      currentFrameNumber = driftDetector.lastIdentifiedFrame?.frameNumber ?: 0L,
+      trackingQuality = trackingQuality,
       detectedPlanes = scratchPlaneList,
       detectedImages = scratchImageList
     )
@@ -1048,6 +1092,217 @@ class ArCoreSessionManager(private val context: Context) {
       Log.e(TAG, "Failed to create ARCore Anchor", e)
       null
     }
+  }
+
+  fun createAnchor(pose: Pose): Anchor? {
+    val s = session ?: return null
+    return try {
+      s.createAnchor(pose)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed creating ARCore Anchor from Pose: ${e.message}", e)
+      null
+    }
+  }
+
+  /**
+   * Comprehensive Multi-Tier Hit Test:
+   * 1. Verified Stable Plane (Horizontal Upward tables/floors, then Vertical walls)
+   * 2. ARCore Depth Point Cloud (via Depth API)
+   * 3. Direct Depth Image Map Sampling (True physical surface reconstruction for non-planar geometry)
+   * 4. Real Instant Placement (Full Tracking vs Tentative)
+   * 5. Feature Points (Estimated Surface Normal, then Generic)
+   */
+  fun performComprehensiveHitTest(
+    frame: Frame,
+    xPx: Float,
+    yPx: Float,
+    viewportWidth: Int,
+    viewportHeight: Int
+  ): ComprehensiveHitResult? {
+    if (frame.camera.trackingState != TrackingState.TRACKING) return null
+
+    val hits = try { frame.hitTest(xPx, yPx) } catch (_: Throwable) { emptyList() }
+
+    // 1. STABLE PLANE (Highest Priority)
+    var bestPlaneHit: HitResult? = null
+    var bestPlaneScore = -1f
+    var bestPlane: Plane? = null
+
+    for (hit in hits) {
+      val trackable = hit.trackable
+      if (trackable is Plane && trackable.trackingState == TrackingState.TRACKING) {
+        val rootPlane = trackable.subsumedBy ?: trackable
+        if (rootPlane.trackingState == TrackingState.TRACKING) {
+          val inPolygon = rootPlane.isPoseInPolygon(hit.hitPose)
+          val area = rootPlane.extentX * rootPlane.extentZ
+          val isHorizontalUp = rootPlane.type == Plane.Type.HORIZONTAL_UPWARD_FACING
+          val isVertical = rootPlane.type == Plane.Type.VERTICAL
+
+          if (inPolygon && area >= 0.02f) {
+            val score = (if (isHorizontalUp) 100f else if (isVertical) 80f else 60f) + area.coerceAtMost(5f)
+            if (score > bestPlaneScore) {
+              bestPlaneScore = score
+              bestPlaneHit = hit
+              bestPlane = rootPlane
+            }
+          } else if (bestPlaneHit == null && rootPlane.isPoseInExtents(hit.hitPose) && area >= 0.04f) {
+            val score = (if (isHorizontalUp) 40f else if (isVertical) 30f else 20f) + area.coerceAtMost(3f)
+            if (score > bestPlaneScore) {
+              bestPlaneScore = score
+              bestPlaneHit = hit
+              bestPlane = rootPlane
+            }
+          }
+        }
+      }
+    }
+
+    if (bestPlaneHit != null && bestPlane != null) {
+      val hitType = when (bestPlane.type) {
+        Plane.Type.HORIZONTAL_UPWARD_FACING -> ComprehensiveHitType.STABLE_PLANE_HORIZONTAL
+        Plane.Type.VERTICAL -> ComprehensiveHitType.STABLE_PLANE_VERTICAL
+        else -> ComprehensiveHitType.STABLE_PLANE_EXTENTS
+      }
+      return ComprehensiveHitResult(
+        hitResult = bestPlaneHit,
+        hitPose = bestPlaneHit.hitPose,
+        hitType = hitType,
+        distanceMeters = bestPlaneHit.distance,
+        isInstantTentative = false,
+        plane = bestPlane,
+        confidenceScore = 1.0f
+      )
+    }
+
+    // 2. DEPTH POINT CLOUD (From ARCore Depth API)
+    val depthPointHit = hits.firstOrNull { hit ->
+      val trackable = hit.trackable
+      val isDepth = trackable != null && (trackable.javaClass.simpleName.contains("DepthPoint") || trackable is com.google.ar.core.DepthPoint)
+      isDepth && hit.distance in 0.25f..5.0f
+    }
+    if (depthPointHit != null) {
+      return ComprehensiveHitResult(
+        hitResult = depthPointHit,
+        hitPose = depthPointHit.hitPose,
+        hitType = ComprehensiveHitType.DEPTH_POINT_CLOUD,
+        distanceMeters = depthPointHit.distance,
+        isInstantTentative = false,
+        confidenceScore = 0.95f
+      )
+    }
+
+    // 3. DIRECT DEPTH MAP SAMPLING (True physical depth on non-planar surfaces)
+    val dom = depthOcclusionManager
+    if (dom != null && viewportWidth > 0 && viewportHeight > 0) {
+      val normX = (xPx / viewportWidth).coerceIn(0f, 1f)
+      val normY = (yPx / viewportHeight).coerceIn(0f, 1f)
+      val sampledDepth = dom.sampleDepthMetersAtViewCoord(frame, normX, normY)
+      if (sampledDepth != null && sampledDepth in 0.25f..6.0f) {
+        val camPose = frame.camera.pose
+        val proj = FloatArray(16)
+        frame.camera.getProjectionMatrix(proj, 0, 0.1f, 100f)
+        val tanFovX = if (proj[0] > 0.001f) 1.0f / proj[0] else 0.75f
+        val tanFovY = if (proj[5] > 0.001f) 1.0f / proj[5] else 1.0f
+        val camX = (normX * 2.0f - 1.0f) * tanFovX * sampledDepth
+        val camY = -(normY * 2.0f - 1.0f) * tanFovY * sampledDepth
+        val camZ = -sampledDepth
+        val worldPos = camPose.transformPoint(floatArrayOf(camX, camY, camZ))
+
+        val depthHitPose = Pose(
+          worldPos,
+          floatArrayOf(0f, 0f, 0f, 1f)
+        )
+        return ComprehensiveHitResult(
+          hitResult = null,
+          hitPose = depthHitPose,
+          hitType = ComprehensiveHitType.DEPTH_IMAGE_MAP_SAMPLING,
+          distanceMeters = sampledDepth,
+          isInstantTentative = false,
+          confidenceScore = 0.90f
+        )
+      }
+    }
+
+    // 4. REAL INSTANT PLACEMENT
+    val instantHits = hits.filter { it.trackable is com.google.ar.core.InstantPlacementPoint }
+    val fullTrackingInstant = instantHits.firstOrNull {
+      val pt = it.trackable as com.google.ar.core.InstantPlacementPoint
+      pt.trackingMethod == com.google.ar.core.InstantPlacementPoint.TrackingMethod.FULL_TRACKING
+    }
+    if (fullTrackingInstant != null) {
+      return ComprehensiveHitResult(
+        hitResult = fullTrackingInstant,
+        hitPose = fullTrackingInstant.hitPose,
+        hitType = ComprehensiveHitType.INSTANT_PLACEMENT_FULL,
+        distanceMeters = fullTrackingInstant.distance,
+        isInstantTentative = false,
+        confidenceScore = 0.85f
+      )
+    }
+
+    try {
+      val directHits = frame.hitTestInstantPlacement(xPx, yPx, 1.5f)
+      val directHit = directHits.firstOrNull()
+      if (directHit != null) {
+        val pt = directHit.trackable as? com.google.ar.core.InstantPlacementPoint
+        val isFull = pt?.trackingMethod == com.google.ar.core.InstantPlacementPoint.TrackingMethod.FULL_TRACKING
+        return ComprehensiveHitResult(
+          hitResult = directHit,
+          hitPose = directHit.hitPose,
+          hitType = if (isFull) ComprehensiveHitType.INSTANT_PLACEMENT_FULL else ComprehensiveHitType.INSTANT_PLACEMENT_TENTATIVE,
+          distanceMeters = directHit.distance,
+          isInstantTentative = !isFull,
+          confidenceScore = if (isFull) 0.85f else 0.70f
+        )
+      }
+    } catch (_: Throwable) {}
+
+    val tentativeInstant = instantHits.firstOrNull()
+    if (tentativeInstant != null) {
+      return ComprehensiveHitResult(
+        hitResult = tentativeInstant,
+        hitPose = tentativeInstant.hitPose,
+        hitType = ComprehensiveHitType.INSTANT_PLACEMENT_TENTATIVE,
+        distanceMeters = tentativeInstant.distance,
+        isInstantTentative = true,
+        confidenceScore = 0.70f
+      )
+    }
+
+    // 5. FEATURE POINTS
+    val orientedPointHit = hits.firstOrNull { hit ->
+      val trackable = hit.trackable
+      if (trackable is com.google.ar.core.Point && trackable.trackingState == TrackingState.TRACKING) {
+        trackable.orientationMode == com.google.ar.core.Point.OrientationMode.ESTIMATED_SURFACE_NORMAL
+      } else false
+    }
+    if (orientedPointHit != null) {
+      return ComprehensiveHitResult(
+        hitResult = orientedPointHit,
+        hitPose = orientedPointHit.hitPose,
+        hitType = ComprehensiveHitType.ORIENTED_FEATURE_POINT,
+        distanceMeters = orientedPointHit.distance,
+        isInstantTentative = false,
+        confidenceScore = 0.60f
+      )
+    }
+
+    val genericPointHit = hits.firstOrNull { hit ->
+      val trackable = hit.trackable
+      trackable is com.google.ar.core.Point && trackable.trackingState == TrackingState.TRACKING
+    }
+    if (genericPointHit != null) {
+      return ComprehensiveHitResult(
+        hitResult = genericPointHit,
+        hitPose = genericPointHit.hitPose,
+        hitType = ComprehensiveHitType.GENERIC_FEATURE_POINT,
+        distanceMeters = genericPointHit.distance,
+        isInstantTentative = false,
+        confidenceScore = 0.50f
+      )
+    }
+
+    return null
   }
 
   fun createAnchorFromImage(image: AugmentedImage): Anchor? {

@@ -117,6 +117,9 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   private val _ipdMm = MutableStateFlow(64.0f)
   val ipdMm: StateFlow<Float> = _ipdMm.asStateFlow()
 
+  private val _modelRollDegrees = MutableStateFlow(0f)
+  val modelRollDegrees: StateFlow<Float> = _modelRollDegrees.asStateFlow()
+
   private val _telemetry = MutableStateFlow(TelemetryState())
   val telemetry: StateFlow<TelemetryState> = _telemetry.asStateFlow()
 
@@ -335,6 +338,10 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   fun setAmbientIntensity(intensity: Float) { _ambientIntensity.value = intensity }
   fun setSunIntensity(intensity: Float) { _sunIntensity.value = intensity }
   fun setIpdMm(ipd: Float) { _ipdMm.value = ipd }
+  fun setModelRollDegrees(roll: Float) {
+    _modelRollDegrees.value = roll
+    _telemetry.update { it.copy(modelRollDegrees = roll) }
+  }
   fun toggleFullscreenUi() {
     _uiVisibilityState.update { current ->
       if (current == UiVisibilityState.NORMAL_UI) UiVisibilityState.FULLSCREEN_UI else UiVisibilityState.NORMAL_UI
@@ -485,6 +492,12 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         isValidatedLocalSceneMesh = trackingData.reconstructionTelemetry.isValidatedLocalSceneMesh,
         isFull3dSceneReconstruction = trackingData.reconstructionTelemetry.isFull3dSceneReconstruction,
         reconstructionStage = trackingData.reconstructionTelemetry.reconstructionStage,
+        isDriftActive = trackingData.isDriftActive,
+        driftStartFrameIndex = trackingData.driftStartFrameIndex,
+        driftCategory = trackingData.driftCategory,
+        accumulatedDriftMeters = trackingData.accumulatedDriftMeters,
+        currentFrameNumber = trackingData.currentFrameNumber,
+        trackingQuality = trackingData.trackingQuality,
         metricDimensions = modelDimensions
       )
     }
