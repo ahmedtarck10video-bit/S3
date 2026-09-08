@@ -230,7 +230,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
   init {
     setEGLContextClientVersion(2)
-    setEGLConfigChooser(false)
+    setEGLConfigChooser(8, 8, 8, 8, 16, 0)
     preserveEGLContextOnPause = true
     setRenderer(this)
     renderMode = RENDERMODE_WHEN_DIRTY
@@ -392,27 +392,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
       GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
-      // 2. Create the ONE authoritative SurfaceTexture synchronized with GL texture
-      // Using SurfaceTexture(false) detached pattern avoids deprecated SurfaceTexture(int) which
-      // triggers internal eglQueryContext calls in emulator translation layers.
-      val st = try {
-        SurfaceTexture(false).apply {
-          attachToGLContext(textureId)
-        }
-      } catch (e: Exception) {
-        Log.w(TAG, "Detached SurfaceTexture fallback: ${e.message}")
-        SurfaceTexture(textureId)
-      }
-      st.setDefaultBufferSize(viewWidth, viewHeight)
-      st.setOnFrameAvailableListener(this)
-      surfaceTexture = st
-
-      // 3. Create the ONE authoritative Camera Surface from SurfaceTexture
-      val surf = Surface(st)
-      cameraSurface = surf
-      onCameraSurfaceReady?.invoke(surf)
-
-      // 4. Rebind ARCore to the new GL texture on this GL thread
+      // 2. Rebind ARCore to the new GL texture on this GL thread
       onCameraTextureReady?.invoke(textureId)
       val sm = arCoreSessionManager
       if (sm != null) {
@@ -422,12 +402,22 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
         }
       }
 
-      // CameraX is strictly a fallback for devices without ARCore installed when in AR or MR mode
-      if (displayMode != DisplayMode.OBJECT && sm != null && !sm.isArCorePackageInstalled()) {
-        lifecycleOwner?.let { owner ->
-          post {
-            startCameraX(owner)
+      // 3. Fallback CameraX pipeline: Only instantiate SurfaceTexture if ARCore is not installed
+      val isArCoreReady = sm != null && sm.isArCorePackageInstalled()
+      if (!isArCoreReady && displayMode != DisplayMode.OBJECT) {
+        try {
+          val st = SurfaceTexture(textureId)
+          st.setDefaultBufferSize(maxOf(viewWidth, 1), maxOf(viewHeight, 1))
+          st.setOnFrameAvailableListener(this)
+          surfaceTexture = st
+          val surf = Surface(st)
+          cameraSurface = surf
+          onCameraSurfaceReady?.invoke(surf)
+          lifecycleOwner?.let { owner ->
+            post { startCameraX(owner) }
           }
+        } catch (e: Exception) {
+          Log.w(TAG, "Fallback CameraX SurfaceTexture init: ${e.message}")
         }
       }
 
