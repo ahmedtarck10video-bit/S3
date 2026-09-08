@@ -57,13 +57,21 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
   val filamentEngine = FilamentEngineHolder(context)
   val arCoreSessionManager = ArCoreSessionManager(context)
-  val depthOcclusionManager = DepthOcclusionManager()
+  val depthOcclusionManager: DepthOcclusionManager
+    get() = arCoreSessionManager.depthOcclusionManager
+
+  enum class WorldPlacementMode {
+    PRE_ANCHOR_PREVIEW,
+    ANCHORED_WORLD
+  }
+
+  var placementMode: WorldPlacementMode = WorldPlacementMode.PRE_ANCHOR_PREVIEW
 
   var dualCameraGLSurfaceView: DualCameraGLSurfaceView? = null
     set(value) {
       field = value
       value?.arCoreSessionManager = arCoreSessionManager
-      value?.depthOcclusionManager = depthOcclusionManager
+      value?.depthOcclusionManager = arCoreSessionManager.depthOcclusionManager
       value?.displayMode = displayMode
       if (value != null && (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR)) {
         val tex = value.textureId
@@ -100,6 +108,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private val rotateGestureDetector: TwoFingerRotateDetector
   private var lastTouchX = 0f
   private var lastTouchY = 0f
+  private var touchStartX = 0f
+  private var touchStartY = 0f
   private var lastMidX = 0f
   private var lastMidY = 0f
   private var activePointerCount = 0
@@ -192,7 +202,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
       if (displayMode == DisplayMode.OBJECT) {
         filamentEngine.orbitYaw -= deltaDegrees
       } else {
-        filamentEngine.modelRotationDegrees -= deltaDegrees
+        // Z-axis Roll rotation with full 360-degree range
+        filamentEngine.modelRollDegrees = (filamentEngine.modelRollDegrees - deltaDegrees) % 360f
       }
     }
   }
@@ -210,6 +221,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
         val existing = filamentEngine.activeExhibits.firstOrNull { it.markerId == markerId }
         if (existing == null && anchor != null) {
           activeArAnchors.add(anchor)
+          placementMode = WorldPlacementMode.ANCHORED_WORLD
+          arCoreSessionManager.registerAnchor(anchor)
           val glbBuffer = GltfAssetFactory.getPresetGlbBuffer(marker.modelId)
           if (glbBuffer != null) {
             val exhibitId = "exhibit_marker_${markerId}"
@@ -374,57 +387,57 @@ class SpatialSurfaceView @JvmOverloads constructor(
         }
 
         DisplayMode.AR -> {
-          val frame = arCoreSessionManager.latestFrame
-          if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
-            frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
-            frame.camera.getViewMatrix(scratchViewMatrix, 0)
+          val syncState = arCoreSessionManager.currentSynchronizedState
+          val isTracking = syncState != null && syncState.trackingState == TrackingState.TRACKING
 
-            filamentEngine.setCameraFromArCore(scratchProjMatrix, scratchViewMatrix)
+          if (isTracking && syncState != null) {
+            consecutiveNullFrames = 0
+            // Derive camera projection and view matrix strictly from this synchronized state
+            filamentEngine.setCameraFromArCore(syncState.projectionMatrix, syncState.viewMatrix)
 
-            // Extract camera forward vector from view matrix for unanchored placement
-            scratchCamForward[0] = -scratchViewMatrix[2]
-            scratchCamForward[1] = -scratchViewMatrix[6]
-            scratchCamForward[2] = -scratchViewMatrix[10]
+            // Extract camera forward vector from current synchronized view matrix
+            scratchCamForward[0] = syncState.cameraForward[0]
+            scratchCamForward[1] = syncState.cameraForward[1]
+            scratchCamForward[2] = syncState.cameraForward[2]
 
-            // Time-based Depth Occlusion: evaluate every ~100ms (~10fps) to eliminate CPU bottleneck
-            if (nowMs - lastDepthTimeMs >= 100L) {
-              lastDepthTimeMs = nowMs
-              scratchAnchorPoses.clear()
-              for (i in 0 until activeArAnchors.size) {
-                val a = activeArAnchors[i]
-                if (a.trackingState == TrackingState.TRACKING) {
-                  scratchAnchorPoses.add(a.pose)
-                }
-              }
-              depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
-              val activeDist = if (scratchAnchorPoses.isNotEmpty()) {
-                val pose = scratchAnchorPoses[0]
-                val camPos = latestTrackingData.cameraPosition
+            // Synchronize Environmental HDR lighting with this exact frame
+            filamentEngine.updateEnvironmentalHdrLighting(
+              mainLightDir = syncState.mainLightDirection,
+              mainLightIntensityRgb = syncState.mainLightIntensity,
+              colorCorrection = syncState.colorCorrectionRgb
+            )
+
+            // Depth Occlusion strictly tied to synchronized frame timestamp
+            if (syncState.isDepthValid) {
+              val activeDist = if (syncState.primaryAnchorPose != null) {
+                val pose = syncState.primaryAnchorPose
+                val camPos = syncState.cameraPosition
                 val dx = pose.tx() - camPos[0]
                 val dy = pose.ty() - camPos[1]
                 val dz = pose.tz() - camPos[2]
                 Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
               } else 1.2f
               dualCameraGLSurfaceView?.virtualDepthMeters = activeDist
+
               filamentEngine.updateGpuDepthOcclusion(
-                textureId = depthOcclusionManager.depthTextureId,
-                width = depthOcclusionManager.depthWidth,
-                height = depthOcclusionManager.depthHeight,
-                timestampNs = depthOcclusionManager.latestDepthTimestampNs,
-                minDepth = depthOcclusionManager.minDepthMeters,
-                maxDepth = depthOcclusionManager.maxDepthMeters,
-                avgDepth = depthOcclusionManager.averageDepthMeters,
-                isReady = depthOcclusionManager.isDepthTextureReady,
-                occlusionPercentage = depthOcclusionManager.occlusionPercentage,
-                depthUvTransformMatrix = depthOcclusionManager.depthUvTransformMatrix,
-                viewMatrix = scratchViewMatrix
+                textureId = syncState.depthTextureId,
+                width = syncState.depthWidth,
+                height = syncState.depthHeight,
+                timestampNs = syncState.depthTimestampNs,
+                minDepth = syncState.minDepthMeters,
+                maxDepth = syncState.maxDepthMeters,
+                avgDepth = syncState.averageDepthMeters,
+                isReady = true,
+                occlusionPercentage = syncState.occlusionPercentage,
+                depthUvTransformMatrix = syncState.depthUvTransformMatrix,
+                viewMatrix = syncState.viewMatrix
               )
             }
 
             // Time-based Dynamic LOD evaluation: every ~150ms with zero heap allocations
             if (nowMs - lastLodTimeMs >= 150L) {
               lastLodTimeMs = nowMs
-              val camPos = latestTrackingData.cameraPosition
+              val camPos = syncState.cameraPosition
               for (exhibit in filamentEngine.activeExhibits) {
                 val anchor = exhibit.anchor
                 if (anchor != null && anchor.trackingState == TrackingState.TRACKING) {
@@ -450,81 +463,69 @@ class SpatialSurfaceView @JvmOverloads constructor(
             // If no multi-exhibits spawned yet, update the single selected asset
             val currentAsset = filamentEngine.currentAsset
             if (currentAsset != null && filamentEngine.activeExhibits.isEmpty()) {
-              val primaryAnchor = activeArAnchors.lastOrNull()
-              if (primaryAnchor != null) {
-                if (primaryAnchor.trackingState == TrackingState.TRACKING) {
-                  anchorLastKnownPoses[primaryAnchor.hashCode()] = primaryAnchor.pose
-                  filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
+              if (placementMode == WorldPlacementMode.ANCHORED_WORLD) {
+                val reconciledPose = syncState.primaryAnchorPose
+                if (reconciledPose != null) {
+                  anchorLastKnownPoses[reconciledPose.hashCode()] = reconciledPose
+                  filamentEngine.updateAnchorPose(currentAsset, reconciledPose)
                 } else {
-                  // Hold at last valid pose during tracking pause or loss to prevent jumping
-                  anchorLastKnownPoses[primaryAnchor.hashCode()]?.let { lastPose ->
+                  // Controlled Recovery: Hold at last known pose during tracking pause to eliminate jumping
+                  anchorLastKnownPoses.values.lastOrNull()?.let { lastPose ->
                     filamentEngine.updateAnchorPose(currentAsset, lastPose)
                   }
                 }
               } else {
                 // Initial placement preview mode before user taps to anchor
-                filamentEngine.updateUnanchoredPose(currentAsset, latestTrackingData.cameraPosition, scratchCamForward)
+                filamentEngine.updateUnanchoredPose(currentAsset, syncState.cameraPosition, scratchCamForward)
               }
             }
           } else {
-            // Robust AR Camera with Device Orientation when AR tracking is uninitialized or lost
+            // Robust AR Camera with Device Orientation when AR tracking is uninitialized, paused, or lost
+            consecutiveNullFrames++
             filamentEngine.updateArCamera(sensorPitch, sensorYaw, sensorRoll)
             val currentAsset = filamentEngine.currentAsset
             if (currentAsset != null && filamentEngine.activeExhibits.isEmpty()) {
-              val primaryAnchor = activeArAnchors.lastOrNull()
-              if (primaryAnchor == null) {
+              if (placementMode == WorldPlacementMode.PRE_ANCHOR_PREVIEW) {
                 filamentEngine.updateUnanchoredPose(currentAsset, null, scratchCamForward)
               }
-              // If already anchored, freeze in place (do not drag relative to phone camera!)
+              // If already anchored, freeze in world space (never drag relative to camera!)
             }
           }
           filamentEngine.renderFrame(frameTimeNanos)
         }
 
         DisplayMode.MR -> {
-          val frame = arCoreSessionManager.latestFrame
-          val hasValidTracking = frame != null && frame.camera.trackingState == TrackingState.TRACKING
-          if (hasValidTracking && frame != null) {
-            frame.camera.getViewMatrix(scratchViewMatrix, 0)
+          val syncState = arCoreSessionManager.currentSynchronizedState
+          val hasValidTracking = syncState != null && syncState.trackingState == TrackingState.TRACKING
+          if (hasValidTracking && syncState != null) {
+            System.arraycopy(syncState.viewMatrix, 0, scratchViewMatrix, 0, 16)
             if (android.opengl.Matrix.invertM(scratchHeadPoseMatrix, 0, scratchViewMatrix, 0)) {
               System.arraycopy(scratchHeadPoseMatrix, 0, lastValidHeadPoseMatrix, 0, 16)
               hasStoredHeadPose = true
             }
-            scratchCamForward[0] = -scratchViewMatrix[2]
-            scratchCamForward[1] = -scratchViewMatrix[6]
-            scratchCamForward[2] = -scratchViewMatrix[10]
+            scratchCamForward[0] = syncState.cameraForward[0]
+            scratchCamForward[1] = syncState.cameraForward[1]
+            scratchCamForward[2] = syncState.cameraForward[2]
+
+            // Synchronized depth in MR
+            if (syncState.isDepthValid) {
+              filamentEngine.updateGpuDepthOcclusion(
+                textureId = syncState.depthTextureId,
+                width = syncState.depthWidth,
+                height = syncState.depthHeight,
+                timestampNs = syncState.depthTimestampNs,
+                minDepth = syncState.minDepthMeters,
+                maxDepth = syncState.maxDepthMeters,
+                avgDepth = syncState.averageDepthMeters,
+                isReady = true,
+                occlusionPercentage = syncState.occlusionPercentage,
+                depthUvTransformMatrix = syncState.depthUvTransformMatrix,
+                viewMatrix = scratchViewMatrix
+              )
+            }
           } else if (hasStoredHeadPose) {
             // Decouple camera stream from tracking: retain last valid head pose during tracking loss
             System.arraycopy(lastValidHeadPoseMatrix, 0, scratchHeadPoseMatrix, 0, 16)
-          }
-
-          // Process Depth in MR on time-based interval (~100ms)
-          if (frame != null && nowMs - lastDepthTimeMs >= 100L) {
-            lastDepthTimeMs = nowMs
-            scratchAnchorPoses.clear()
-            for (i in 0 until activeArAnchors.size) {
-              val a = activeArAnchors[i]
-              if (a.trackingState == TrackingState.TRACKING) {
-                anchorLastKnownPoses[a.hashCode()] = a.pose
-                scratchAnchorPoses.add(a.pose)
-              } else {
-                anchorLastKnownPoses[a.hashCode()]?.let { scratchAnchorPoses.add(it) }
-              }
-            }
-            depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
-            filamentEngine.updateGpuDepthOcclusion(
-              textureId = depthOcclusionManager.depthTextureId,
-              width = depthOcclusionManager.depthWidth,
-              height = depthOcclusionManager.depthHeight,
-              timestampNs = depthOcclusionManager.latestDepthTimestampNs,
-              minDepth = depthOcclusionManager.minDepthMeters,
-              maxDepth = depthOcclusionManager.maxDepthMeters,
-              avgDepth = depthOcclusionManager.averageDepthMeters,
-              isReady = depthOcclusionManager.isDepthTextureReady,
-              occlusionPercentage = depthOcclusionManager.occlusionPercentage,
-              depthUvTransformMatrix = depthOcclusionManager.depthUvTransformMatrix,
-              viewMatrix = scratchViewMatrix
-            )
           }
 
           // Synchronize all exhibit transforms with finger gestures (rotation, scale, position)
@@ -533,14 +534,13 @@ class SpatialSurfaceView @JvmOverloads constructor(
           // If no multi-exhibits spawned yet, update single selected asset
           val currentAsset = filamentEngine.currentAsset
           if (currentAsset != null && filamentEngine.activeExhibits.isEmpty()) {
-            val primaryAnchor = activeArAnchors.lastOrNull()
-            if (primaryAnchor != null) {
-              if (primaryAnchor.trackingState == TrackingState.TRACKING) {
-                anchorLastKnownPoses[primaryAnchor.hashCode()] = primaryAnchor.pose
-                filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
+            if (placementMode == WorldPlacementMode.ANCHORED_WORLD) {
+              val reconciledPose = syncState?.primaryAnchorPose
+              if (reconciledPose != null) {
+                anchorLastKnownPoses[reconciledPose.hashCode()] = reconciledPose
+                filamentEngine.updateAnchorPose(currentAsset, reconciledPose)
               } else {
-                // Hold at last valid pose during tracking pause or loss
-                anchorLastKnownPoses[primaryAnchor.hashCode()]?.let { lastPose ->
+                anchorLastKnownPoses.values.lastOrNull()?.let { lastPose ->
                   filamentEngine.updateAnchorPose(currentAsset, lastPose)
                 }
               }
@@ -575,6 +575,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
       MotionEvent.ACTION_DOWN -> {
         lastTouchX = event.x
         lastTouchY = event.y
+        touchStartX = event.x
+        touchStartY = event.y
         activePointerCount = 1
         touchStartTime = System.currentTimeMillis()
         return true
@@ -598,9 +600,11 @@ class SpatialSurfaceView @JvmOverloads constructor(
             filamentEngine.orbitYaw -= dx * 0.45f
             filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dy * 0.45f).coerceIn(-80f, 80f)
           } else {
-            // 1 finger = Y-axis Yaw (horizontal) and X-axis Pitch (vertical) rotation with full 360-degree range
-            filamentEngine.modelRotationDegrees -= dx * 0.45f
-            filamentEngine.modelPitchDegrees += dy * 0.45f
+            // 1 finger = Y-axis Yaw (horizontal drag) and X-axis Pitch (vertical drag) rotation with full 360° range
+            // Preserve the current left/right rotation direction exactly. DO NOT reverse it.
+            filamentEngine.modelRotationDegrees = (filamentEngine.modelRotationDegrees - dx * 0.45f) % 360f
+            // Vertical drag rotates top-to-bottom around model's centroid, NOT translating vertically:
+            filamentEngine.modelPitchDegrees = (filamentEngine.modelPitchDegrees + dy * 0.45f) % 360f
           }
           lastTouchX = event.x
           lastTouchY = event.y
@@ -610,7 +614,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val dMidX = midX - lastMidX
           val dMidY = midY - lastMidY
 
-          // 2 fingers = Move / Reposition / Pan when not actively scaling or twisting
+          // 2 fingers = Move / Reposition / Pan strictly separated from rotation (only when not scaling or twisting)
           if (!scaleGestureDetector.isInProgress && !rotateGestureDetector.isActivelyTwisting) {
             if (displayMode == DisplayMode.OBJECT) {
               filamentEngine.panX = (filamentEngine.panX + dMidX * 0.003f).coerceIn(-0.35f, 0.35f)
@@ -628,10 +632,10 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
       MotionEvent.ACTION_UP -> {
         val duration = System.currentTimeMillis() - touchStartTime
-        val movedDist = abs(event.x - lastTouchX) + abs(event.y - lastTouchY)
-        if (duration < 300 && movedDist < 20) {
+        val movedDist = abs(event.x - touchStartX) + abs(event.y - touchStartY)
+        if (duration < 350 && movedDist < 25) {
           handleTap(event.x, event.y)
-        } else if (duration >= 450 && movedDist < 30 && (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR)) {
+        } else if (duration >= 450 && movedDist < 35 && (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR)) {
           // Long press on detected plane places/updates anchor without interfering with one-tap UI toggle
           handleLongPressPlaneAnchor(event.x, event.y)
         }
@@ -712,6 +716,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
           }
           activeArAnchors.clear()
           activeArAnchors.add(anchor)
+          placementMode = WorldPlacementMode.ANCHORED_WORLD
+          arCoreSessionManager.registerPrimaryAnchor(anchor)
           val posArr = floatArrayOf(hx, hy, hz)
 
           filamentEngine.clearAllExhibits()
@@ -764,6 +770,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   fun clearAnchors() {
+    placementMode = WorldPlacementMode.PRE_ANCHOR_PREVIEW
+    arCoreSessionManager.clearRegisteredAnchors()
     for (anchor in activeArAnchors) {
       anchor.detach()
     }

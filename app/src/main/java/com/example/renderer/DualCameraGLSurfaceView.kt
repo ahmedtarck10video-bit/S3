@@ -153,6 +153,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
   var onCameraTextureReady: ((Int) -> Unit)? = null
   var onCameraSurfaceReady: ((Surface) -> Unit)? = null
+  var onSynchronizedRenderStateReady: ((com.example.arcore.SynchronizedArRenderState) -> Unit)? = null
 
   var arCoreSessionManager: ArCoreSessionManager? = null
     set(value) {
@@ -479,6 +480,12 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
         texBuffer.put(scratchTexCoords)
         texBuffer.position(0)
         android.opengl.Matrix.setIdentityM(texMatrix, 0)
+
+        // Notify synchronized AR render state for this exact frame
+        val syncState = sm?.currentSynchronizedState
+        if (syncState != null) {
+          onSynchronizedRenderStateReady?.invoke(syncState)
+        }
       } else {
         val st = surfaceTexture
         if (hasNewFrame && st != null) {
@@ -510,17 +517,18 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
       GLES20.glUniform1i(uTextureHandle, 0)
 
-      // True GPU Depth Occlusion: Bind and sample physical depth texture
+      // True GPU Depth Occlusion: Bind and sample physical depth texture strictly when synchronized with current frame
       val dom = depthOcclusionManager
-      val isDepthActive = dom != null && dom.depthTextureId != 0 && dom.isDepthTextureReady
+      val currentSyncState = sm?.currentSynchronizedState
+      val isDepthActive = dom != null && dom.depthTextureId != 0 && (currentSyncState?.isDepthValid == true)
       if (isDepthActive && dom != null) {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dom.depthTextureId)
         GLES20.glUniform1i(uPhysicalDepthTextureHandle, 1)
-        GLES20.glUniformMatrix4fv(uDepthUvMatrixHandle, 1, false, dom.depthUvTransformMatrix, 0)
+        GLES20.glUniformMatrix4fv(uDepthUvMatrixHandle, 1, false, currentSyncState?.depthUvTransformMatrix ?: dom.depthUvTransformMatrix, 0)
         GLES20.glUniform1i(uDepthOcclusionActiveHandle, 1)
-        GLES20.glUniform1f(uMinPhysicalDepthHandle, dom.minDepthMeters)
-        GLES20.glUniform1f(uMaxPhysicalDepthHandle, dom.maxDepthMeters)
+        GLES20.glUniform1f(uMinPhysicalDepthHandle, currentSyncState?.minDepthMeters ?: dom.minDepthMeters)
+        GLES20.glUniform1f(uMaxPhysicalDepthHandle, currentSyncState?.maxDepthMeters ?: dom.maxDepthMeters)
         GLES20.glUniform1f(uVirtualDepthHandle, virtualDepthMeters)
       } else {
         GLES20.glUniform1i(uDepthOcclusionActiveHandle, 0)

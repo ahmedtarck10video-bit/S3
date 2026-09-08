@@ -147,6 +147,7 @@ class EnvironmentalMeshManager {
       val planes = session.getAllTrackables(Plane::class.java)
       for (plane in planes) {
         if (plane.trackingState != TrackingState.TRACKING) continue
+        if (plane.subsumedBy != null) continue
 
         val polygon = plane.polygon ?: continue
         val numVertices = polygon.limit() / 2

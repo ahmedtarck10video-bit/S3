@@ -371,20 +371,6 @@ fun MixedRealityScreen(
         .testTag("spatial_filament_canvas")
     )
 
-    // In FULLSCREEN_UI, a single tap anywhere on the screen restores the top and bottom UI bars.
-    if (uiVisibilityState == UiVisibilityState.FULLSCREEN_UI) {
-      Box(
-        modifier = Modifier
-          .fillMaxSize()
-          .pointerInput(Unit) {
-            detectTapGestures {
-              hapticManager.performClick()
-              viewModel.toggleFullscreenUi()
-            }
-          }
-      )
-    }
-
     // 2. Diagnostics HUD Overlay (When explicitly enabled via settings and in NORMAL_UI)
     if (showDiagnostics && uiVisibilityState == UiVisibilityState.NORMAL_UI) {
       Box(

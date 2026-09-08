@@ -252,6 +252,48 @@ class ArCoreGeospatialManager {
   }
 
   /**
+   * Resolves a Geospatial Terrain Anchor asynchronously.
+   */
+  fun createTerrainAnchorAsync(
+    session: Session,
+    latitude: Double,
+    longitude: Double,
+    altitudeAboveTerrainMeters: Double,
+    headingDegrees: Double,
+    onComplete: (Anchor?, Anchor.TerrainAnchorState) -> Unit
+  ) {
+    val earth = session.earth ?: run {
+      onComplete(null, Anchor.TerrainAnchorState.ERROR_NOT_AUTHORIZED)
+      return
+    }
+    if (earth.trackingState != TrackingState.TRACKING) {
+      Log.w(TAG, "Cannot create terrain anchor: Earth is not yet in TRACKING state.")
+      onComplete(null, Anchor.TerrainAnchorState.TASK_IN_PROGRESS)
+      return
+    }
+    try {
+      val halfRad = Math.toRadians(headingDegrees / 2.0)
+      val qy = Math.sin(halfRad).toFloat()
+      val qw = Math.cos(halfRad).toFloat()
+      earth.resolveAnchorOnTerrainAsync(
+        latitude,
+        longitude,
+        altitudeAboveTerrainMeters,
+        0f, qy, 0f, qw
+      ) { anchor, state ->
+        if (state == Anchor.TerrainAnchorState.SUCCESS && anchor != null) {
+          geospatialAnchors.add(anchor)
+          Log.i(TAG, "Resolved Terrain Anchor at ($latitude, $longitude)")
+        }
+        onComplete(anchor, state)
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed resolving terrain anchor: ${e.message}")
+      onComplete(null, Anchor.TerrainAnchorState.ERROR_INTERNAL)
+    }
+  }
+
+  /**
    * Checks VPS availability for given location asynchronously.
    */
   fun checkVpsAvailability(session: Session, latitude: Double, longitude: Double, onResult: (Boolean) -> Unit) {

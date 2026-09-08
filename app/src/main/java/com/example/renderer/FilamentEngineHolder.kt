@@ -588,6 +588,7 @@ class FilamentEngineHolder(private val context: Context) {
     }
   var modelRotationDegrees: Float = 0f
   var modelPitchDegrees: Float = 0f
+  var modelRollDegrees: Float = 0f
   var modelOffsetX: Float = 0f
   var modelOffsetY: Float = 0f
   var modelOffsetZ: Float = 0f
@@ -768,11 +769,17 @@ class FilamentEngineHolder(private val context: Context) {
 
   private fun setupLights(eng: Engine, scn: Scene) {
     sunlightEntity = EntityManager.get().create()
+    val shadowOptions = LightManager.ShadowOptions().apply {
+      mapSize = 1024
+      constantBias = 0.005f
+      normalBias = 0.01f
+    }
     LightManager.Builder(LightManager.Type.DIRECTIONAL)
       .color(1.0f, 0.98f, 0.95f)
       .intensity(sunIntensity)
       .direction(-0.25f, -0.92f, -0.30f)
-      .castShadows(false)
+      .castShadows(true)
+      .shadowOptions(shadowOptions)
       .build(eng, sunlightEntity)
     scn.addEntity(sunlightEntity)
 
@@ -912,6 +919,9 @@ class FilamentEngineHolder(private val context: Context) {
       }
       if (modelPitchDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
+      }
+      if (modelRollDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelRollDegrees, 0f, 0f, 1f)
       }
       val miniatureFactor = calculateObjectModeMiniatureScale()
       val effectiveScale = (miniatureFactor * modelScale).coerceIn(0.01f * miniatureFactor, 25.0f * miniatureFactor)
@@ -1161,10 +1171,13 @@ class FilamentEngineHolder(private val context: Context) {
         if (modelPitchDegrees != 0f) {
           Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
         }
+        if (modelRollDegrees != 0f) {
+          Matrix.rotateM(scratchModelMatrix, 0, modelRollDegrees, 0f, 0f, 1f)
+        }
 
         val scale = (exhibit.customScale * modelScale).coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
         Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
-        Matrix.translateM(scratchModelMatrix, 0, exhibit.centerOffsetX, exhibit.centerOffsetY + exhibit.physicalHalfHeight, exhibit.centerOffsetZ)
+        Matrix.translateM(scratchModelMatrix, 0, exhibit.centerOffsetX, exhibit.centerOffsetY, exhibit.centerOffsetZ)
 
         val rootInst = tm.getInstance(exhibit.asset.root)
         if (rootInst != 0) {
@@ -1363,19 +1376,22 @@ class FilamentEngineHolder(private val context: Context) {
     val rootInst = tm.getInstance(asset.root)
     if (rootInst != 0) {
       pose.toMatrix(scratchModelMatrix, 0)
-      Matrix.translateM(scratchModelMatrix, 0, modelOffsetX, modelOffsetY, modelOffsetZ)
+      val scale = modelScale.coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
+      Matrix.translateM(scratchModelMatrix, 0, modelOffsetX, modelOffsetY + (modelPhysicalHalfHeight * scale), modelOffsetZ)
       if (modelRotationDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
       }
       if (modelPitchDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
       }
-      val scale = modelScale.coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
+      if (modelRollDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelRollDegrees, 0f, 0f, 1f)
+      }
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
-      Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY + modelPhysicalHalfHeight, baseCenterOffsetZ)
+      Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
 
-      val groundY = pose.ty()
+      val groundY = pose.ty() + modelOffsetY
       val radius = maxOf(modelPhysicalWidthMeters, modelPhysicalDepthMeters, 0.5f) * scale * 1.8f
       updateShadowReceiverPlane(pose.tx() + modelOffsetX, groundY, pose.tz() + modelOffsetZ, radius)
     }
@@ -1410,6 +1426,9 @@ class FilamentEngineHolder(private val context: Context) {
       }
       if (modelPitchDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
+      }
+      if (modelRollDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelRollDegrees, 0f, 0f, 1f)
       }
       val scale = modelScale.coerceIn(MIN_MODEL_SCALE, MAX_MODEL_SCALE)
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
@@ -1465,6 +1484,7 @@ class FilamentEngineHolder(private val context: Context) {
     modelScale = 1.0f
     modelRotationDegrees = 0f
     modelPitchDegrees = 0f
+    modelRollDegrees = 0f
     modelOffsetX = 0f
     modelOffsetY = 0f
     modelOffsetZ = 0f

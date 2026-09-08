@@ -79,6 +79,9 @@ class DepthOcclusionManager {
   private val depthCoordScratch = FloatArray(2)
   private val scratchScreenPts = floatArrayOf(0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f)
   private val scratchDepthUvs = FloatArray(6)
+  private val scratchViewMatrix = FloatArray(16)
+  private val scratchProjMatrix = FloatArray(16)
+  private val scratchViewProjMatrix = FloatArray(16)
 
   /**
    * 4x4 Affine Transformation Matrix mapping Viewport Screen UV to Depth Texture UV.
@@ -210,7 +213,8 @@ class DepthOcclusionManager {
 
       if (!isSynchronizedWithCamera) {
         // Desynchronized depth frame: camera has moved and optical axes will not align.
-        // Skip occlusion evaluation to prevent projection misalignment artifacts.
+        // Discard stale depth data to prevent projection misalignment and false occlusion.
+        isDepthTextureReady = false
         isOcclusionDetected = false
         occlusionPercentage = 0f
         return
@@ -336,12 +340,9 @@ class DepthOcclusionManager {
       val camTy = camPose.ty()
       val camTz = camPose.tz()
 
-      val viewMatrix = FloatArray(16)
-      val projMatrix = FloatArray(16)
-      val viewProjMatrix = FloatArray(16)
-      frame.camera.getViewMatrix(viewMatrix, 0)
-      frame.camera.getProjectionMatrix(projMatrix, 0, 0.05f, 50.0f)
-      android.opengl.Matrix.multiplyMM(viewProjMatrix, 0, projMatrix, 0, viewMatrix, 0)
+      frame.camera.getViewMatrix(scratchViewMatrix, 0)
+      frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
+      android.opengl.Matrix.multiplyMM(scratchViewProjMatrix, 0, scratchProjMatrix, 0, scratchViewMatrix, 0)
 
       for (anchorPose in virtualAnchorPoses) {
         // Transform anchor into camera space to measure real optical depth along camera optical axis (-Z)
@@ -362,7 +363,7 @@ class DepthOcclusionManager {
         // Project 3D anchor position into screen-space normalized coordinates [0..1]
         val clip = FloatArray(4)
         val worldP = floatArrayOf(anchorPose.tx(), anchorPose.ty(), anchorPose.tz(), 1.0f)
-        android.opengl.Matrix.multiplyMV(clip, 0, viewProjMatrix, 0, worldP, 0)
+        android.opengl.Matrix.multiplyMV(clip, 0, scratchViewProjMatrix, 0, worldP, 0)
 
         val centerScreenX: Float
         val centerScreenY: Float
