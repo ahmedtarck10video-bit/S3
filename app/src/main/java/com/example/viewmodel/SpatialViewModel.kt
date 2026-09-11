@@ -120,6 +120,14 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   private val _modelRollDegrees = MutableStateFlow(0f)
   val modelRollDegrees: StateFlow<Float> = _modelRollDegrees.asStateFlow()
 
+  private val _useSceneViewRenderer = MutableStateFlow(false)
+  val useSceneViewRenderer: StateFlow<Boolean> = _useSceneViewRenderer.asStateFlow()
+
+  fun setUseSceneViewRenderer(enabled: Boolean) {
+    _useSceneViewRenderer.value = enabled
+    logger.log("Renderer", if (enabled) "Switched to SceneView engine" else "Switched to Filament Direct engine")
+  }
+
   private val _telemetry = MutableStateFlow(TelemetryState())
   val telemetry: StateFlow<TelemetryState> = _telemetry.asStateFlow()
 

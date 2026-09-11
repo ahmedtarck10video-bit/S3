@@ -113,6 +113,8 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
+  implementation(libs.sceneview)
+  implementation(libs.arsceneview)
   implementation(libs.filament.android)
   implementation(libs.gltfio.android)
   implementation(libs.filament.utils.android)

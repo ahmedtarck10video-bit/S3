@@ -73,6 +73,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.arcore.ExhibitSource
+import com.example.renderer.SceneViewContainer
 import com.example.engine.HapticManager
 import com.example.model.DisplayMode
 import com.example.renderer.SpatialSurfaceView
@@ -286,6 +287,51 @@ fun MixedRealityScreen(
 
   val isAssetLoading by viewModel.isAssetLoading.collectAsState()
   val assetLoadingProgress by viewModel.assetLoadingProgress.collectAsState()
+  val useSceneViewRenderer by viewModel.useSceneViewRenderer.collectAsState()
+
+  val sceneViewContainer = remember {
+    SceneViewContainer(context).apply {
+      onModelPlaced = { pos ->
+        viewModel.addPlacedAnchor(
+          anchorId = "sceneview_${System.currentTimeMillis()}",
+          worldPos = floatArrayOf(pos.x, pos.y, pos.z),
+          source = ExhibitSource.PLANE_TAP,
+          modelId = selectedModel?.id ?: "unknown",
+          modelTitle = selectedModel?.title ?: "SceneView Model"
+        )
+      }
+    }
+  }
+
+  DisposableEffect(sceneViewContainer) {
+    onDispose {
+      sceneViewContainer.destroy()
+    }
+  }
+
+  // Synchronize state with SceneViewContainer
+  LaunchedEffect(useSceneViewRenderer, activeGlbBuffer, selectedModel, displayMode) {
+    if (useSceneViewRenderer) {
+      sceneViewContainer.displayMode = displayMode
+      val buf = activeGlbBuffer
+      val model = selectedModel
+      if (buf != null && model != null) {
+        sceneViewContainer.loadGlb(buf, model.title)
+      }
+    }
+  }
+
+  LaunchedEffect(useSceneViewRenderer, isPlayingAnimation) {
+    if (useSceneViewRenderer) {
+      sceneViewContainer.setAnimationPlaying(isPlayingAnimation)
+    }
+  }
+
+  LaunchedEffect(useSceneViewRenderer, animationSpeed) {
+    if (useSceneViewRenderer) {
+      sceneViewContainer.setAnimationSpeed(animationSpeed)
+    }
+  }
 
   // Synchronize state with Filament Engine & ARCore Session
   LaunchedEffect(activeGlbBuffer, selectedModel) {
@@ -347,39 +393,49 @@ fun MixedRealityScreen(
       .fillMaxSize()
       .background(Color.Black)
   ) {
-    // 0. Live Hardware Camera Passthrough (AR & MR modes)
-    if (displayMode != DisplayMode.OBJECT) {
-      CameraPassthroughView(
-        displayMode = displayMode,
-        hasCameraPermission = hasCameraPermission,
-        onRequestPermission = {
-          cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-        },
-        onDualCameraCreated = { dualView ->
-          dualView.arCoreSessionManager = spatialSurfaceView.arCoreSessionManager
-          dualView.depthOcclusionManager = spatialSurfaceView.depthOcclusionManager
-          dualView.onCameraTextureReady = { texName ->
-            spatialSurfaceView.arCoreSessionManager.setCameraTextureName(texName)
-            if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
-              activity?.let { act ->
-                spatialSurfaceView.arCoreSessionManager.resumeSession(act)
+    if (useSceneViewRenderer) {
+      // SceneView / ARSceneView Container (Gradle dependency engine)
+      AndroidView(
+        factory = { sceneViewContainer },
+        modifier = Modifier
+          .fillMaxSize()
+          .testTag("sceneview_canvas")
+      )
+    } else {
+      // 0. Live Hardware Camera Passthrough (AR & MR modes)
+      if (displayMode != DisplayMode.OBJECT) {
+        CameraPassthroughView(
+          displayMode = displayMode,
+          hasCameraPermission = hasCameraPermission,
+          onRequestPermission = {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+          },
+          onDualCameraCreated = { dualView ->
+            dualView.arCoreSessionManager = spatialSurfaceView.arCoreSessionManager
+            dualView.depthOcclusionManager = spatialSurfaceView.depthOcclusionManager
+            dualView.onCameraTextureReady = { texName ->
+              spatialSurfaceView.arCoreSessionManager.setCameraTextureName(texName)
+              if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
+                activity?.let { act ->
+                  spatialSurfaceView.arCoreSessionManager.resumeSession(act)
+                }
               }
             }
-          }
-          spatialSurfaceView.dualCameraGLSurfaceView = dualView
-        },
-        isArCoreActive = (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) && spatialSurfaceView.arCoreSessionManager.isSupported,
-        modifier = Modifier.fillMaxSize()
+            spatialSurfaceView.dualCameraGLSurfaceView = dualView
+          },
+          isArCoreActive = (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) && spatialSurfaceView.arCoreSessionManager.isSupported,
+          modifier = Modifier.fillMaxSize()
+        )
+      }
+
+      // 1. Unified Google Filament + ARCore SurfaceView Canvas
+      AndroidView(
+        factory = { spatialSurfaceView },
+        modifier = Modifier
+          .fillMaxSize()
+          .testTag("spatial_filament_canvas")
       )
     }
-
-    // 1. Unified Google Filament + ARCore SurfaceView Canvas
-    AndroidView(
-      factory = { spatialSurfaceView },
-      modifier = Modifier
-        .fillMaxSize()
-        .testTag("spatial_filament_canvas")
-    )
 
     // 2. Diagnostics HUD Overlay (When explicitly enabled via settings and in NORMAL_UI)
     if (showDiagnostics && uiVisibilityState == UiVisibilityState.NORMAL_UI) {
@@ -588,6 +644,8 @@ fun MixedRealityScreen(
         onIpdChange = { viewModel.setIpdMm(it) },
         showDiagnostics = showDiagnostics,
         onDiagnosticsChange = { viewModel.setShowDiagnostics(it) },
+        useSceneViewRenderer = useSceneViewRenderer,
+        onSceneViewRendererChange = { viewModel.setUseSceneViewRenderer(it) },
         modelRollDegrees = modelRollDegrees,
         onRollChange = { viewModel.setModelRollDegrees(it) },
         onResetScene = {

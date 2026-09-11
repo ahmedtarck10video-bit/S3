@@ -43,9 +43,12 @@ credentials = "1.5.0"
 googleid = "1.1.1"
 filament = "1.56.0"
 arcore = "1.47.0"
+sceneview = "2.2.1"
 
 
 [libraries]
+sceneview = { group = "io.github.sceneview", name = "sceneview", version.ref = "sceneview" }
+arsceneview = { group = "io.github.sceneview", name = "arsceneview", version.ref = "sceneview" }
 filament-android = { group = "com.google.android.filament", name = "filament-android", version.ref = "filament" }
 gltfio-android = { group = "com.google.android.filament", name = "gltfio-android", version.ref = "filament" }
 filament-utils-android = { group = "com.google.android.filament", name = "filament-utils-android", version.ref = "filament" }

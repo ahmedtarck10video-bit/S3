@@ -52,6 +52,8 @@ fun SettingsSheet(
   onIpdChange: (Float) -> Unit,
   showDiagnostics: Boolean,
   onDiagnosticsChange: (Boolean) -> Unit,
+  useSceneViewRenderer: Boolean = false,
+  onSceneViewRendererChange: (Boolean) -> Unit = {},
   modelRollDegrees: Float = 0f,
   onRollChange: (Float) -> Unit = {},
   onResetScene: () -> Unit,
@@ -230,6 +232,22 @@ fun SettingsSheet(
         Switch(
           checked = autoRotate,
           onCheckedChange = onAutoRotateChange,
+          colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF38BDF8))
+        )
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Column {
+          Text("SceneView Engine (GLB & AR)", color = Color.White, fontSize = 14.sp)
+          Text("Use SceneView for GLB nodes & ARCore plane tracking", color = Color(0xFF94A3B8), fontSize = 11.sp)
+        }
+        Switch(
+          checked = useSceneViewRenderer,
+          onCheckedChange = onSceneViewRendererChange,
           colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF38BDF8))
         )
       }
